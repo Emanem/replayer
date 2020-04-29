@@ -190,27 +190,22 @@ int main(int argc, char *argv[]) {
 			auto		*penc = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
 			if(!penc)
 				throw std::runtime_error("avcodec_find_encoder");
-			//auto		*pc = avcodec_alloc_context3(penc);
-			//std::unique_ptr<AVCodecContext, void(*)(AVCodecContext*)>	ocodec(pc, [](AVCodecContext* p){ if(p) {avcodec_free_context(&p);} });
+			auto		*pc = avcodec_alloc_context3(penc);
+			std::unique_ptr<AVCodecContext, void(*)(AVCodecContext*)>	ocodec(pc, [](AVCodecContext* p){ if(p) avcodec_free_context(&p); });
 			// setup additinal info about codec
-			AVCodecContext	*ocodec = strm->codec;
-			ocodec->codec_id = AV_CODEC_ID_MPEG4;
-			ocodec->codec_type = AVMEDIA_TYPE_VIDEO;
 			ocodec->pix_fmt  = AV_PIX_FMT_YUV420P;
-			ocodec->bit_rate = 400000;
+			//ocodec->bit_rate = 400000;
 			ocodec->width = 3440;
 			ocodec->height = 1440;
-			ocodec->gop_size = 3;
-			ocodec->max_b_frames = 2;
-			ocodec->time_base.num = 1;
-			ocodec->time_base.den = 60;
+			ocodec->time_base = (AVRational){1, 60};
+			ocodec->framerate = (AVRational){60, 1};
 			// fix about global headers
 			if(octx->oformat->flags & AVFMT_GLOBALHEADER)
 				octx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 			// bind context codec
-			// TODO shouldn't we set the options
-			// here instead of above when we modify the structure?!?!
-			averror(avcodec_open2(ocodec, penc, 0));
+			averror(avcodec_open2(ocodec.get(), penc, 0));
+			// fill in the context parameters
+			averror(avcodec_parameters_from_context(strm->codecpar, ocodec.get()));
 			// in case we have to create a file, do it...
 			if(!(octx->flags & AVFMT_NOFILE)) {
 				averror(avio_open2(&octx->pb , outfile , AVIO_FLAG_WRITE, 0, 0));
@@ -253,7 +248,7 @@ int main(int argc, char *argv[]) {
 				outp.data = 0;
 				outp.size = 0;
 				int	got_pic = 0;
-				averror(avcodec_encode_video2(ocodec, &outp, oframe.get(), &got_pic));
+				averror(avcodec_encode_video2(ocodec.get(), &outp, oframe.get(), &got_pic));
 				if(got_pic) {
 					averror(av_write_frame(octx.get(), &outp));
 				}
@@ -271,8 +266,10 @@ int main(int argc, char *argv[]) {
 					fn_write();
 				} catch(const std::exception& e) {
 					std::cerr << "[f_writer] Exception: " <<  e.what() << std::endl;
+					std::exit(-1);
 				} catch(...) {
 					std::cerr << "[f_writer] Unknown exception" << std::endl;
+					std::exit(-1);
 				}
 			}
 		);
