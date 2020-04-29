@@ -168,7 +168,7 @@ int main(int argc, char *argv[]) {
 		// still use the deprecated member...
 		//averror(avcodec_open2(fctx->streams[vstream]->codec, dec, 0));
 		// try to read n frames
-		const int	MAX_FRAMES = 1000;
+		const int	MAX_FRAMES = 300;
 		int		cur_frame = 0;
 		AVPacket	packet = {0};
 		// structures to share data between threads
@@ -180,10 +180,7 @@ int main(int argc, char *argv[]) {
 			const char	*outfile = "output.mp4";
 			AVFormatContext	*octx_ = 0;
 			averror(avformat_alloc_output_context2(&octx_, 0, 0, outfile));
-			std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	octx(octx_, [](AVFormatContext* p){ if(p) {avformat_close_input(&p);} });
-			AVOutputFormat	*fmt = av_guess_format(0, outfile, 0);
-			if(!fmt)
-				throw std::runtime_error("av_guess_format");
+			std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	octx(octx_, [](AVFormatContext* p){ if(p) avformat_close_input(&p); });
 			AVStream	*strm = avformat_new_stream(octx.get(), 0);
 			if(!strm)
 				throw std::runtime_error("avformat_new_stream");
@@ -242,7 +239,6 @@ int main(int argc, char *argv[]) {
 				}
 				// TODO Use newer API
 				AVPacket	outp = {0};
-				// sws_scale(swsCtx_, pAVFrame->data, pAVFrame->linesize,0, pAVCodecContext->height, outFrame->data,outFrame->linesize);
 				sws_scale(swsctx, fh->frame->data, fh->frame->linesize, 0, ocodec->height, oframe->data, oframe->linesize);
 				av_init_packet(&outp);
 				outp.data = 0;
@@ -276,13 +272,6 @@ int main(int argc, char *argv[]) {
 		// embed in a unique_ptr to leverage RAII
 		while(av_read_frame(fctx.get(), &packet) >= 0) {
 			if(vstream == packet.stream_index) {
-				// deprecated
-				/*int	got_picture = 0;
-				averror(avcodec_decode_video2(ccodec.get(), frame.get(), &got_picture, &packet));
-				if(got_picture) {
-					if(cur_frame++ >= MAX_FRAMES)
-						break;
-				}*/
 				averror(avcodec_send_packet(ccodec.get(), &packet));
 				while(1) {
 					// get a frame
