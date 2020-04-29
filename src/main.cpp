@@ -121,6 +121,8 @@ int main(int argc, char *argv[]) {
 		// Initial setup
 		av_register_all();
 		avdevice_register_all();
+		// fps value
+		const int	FPS = 30;
 		// HW decode sample https://ffmpeg.org/doxygen/3.4/hw__decode_8c_source.html
 		// get X11
 		auto*	x11format = av_find_input_format("x11grab");
@@ -129,7 +131,7 @@ int main(int argc, char *argv[]) {
 		// open x11grab
 		AVFormatContext	*fctx_ = 0;
 		AVDictionary	*opt = 0;
-		av_dict_set(&opt, "framerate", "30", 0);
+		av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
 		av_dict_set(&opt, "video_size", "3440x1440", 0);
 		averror(avformat_open_input(&fctx_, ":0.0", x11format, &opt));
 		// this is not great... but still
@@ -168,7 +170,7 @@ int main(int argc, char *argv[]) {
 		// still use the deprecated member...
 		//averror(avcodec_open2(fctx->streams[vstream]->codec, dec, 0));
 		// try to read n frames
-		const int	MAX_FRAMES = 300;
+		const int	MAX_FRAMES = 10*FPS;
 		int		cur_frame = 0;
 		AVPacket	packet = {0};
 		// structures to share data between threads
@@ -176,7 +178,7 @@ int main(int argc, char *argv[]) {
 		concurrent_deque<frame_holder*>	c_deq;
 		frame_buffers			frame_bufs(16);
 		std::atomic<bool>		run(true);
-		auto				fn_write = [&c_deq, &run, &ccodec]() -> void {
+		auto				fn_write = [&c_deq, &run, &ccodec, &FPS]() -> void {
 			const char	*outfile = "output.mkv";
 			AVOutputFormat  *ofmt = av_guess_format(0, outfile, 0);
 			if(!ofmt)
@@ -190,17 +192,17 @@ int main(int argc, char *argv[]) {
 			AVStream	*strm = avformat_new_stream(octx.get(), penc);
 			if(!strm)
 				throw std::runtime_error("avformat_new_stream");
-			strm->time_base = (AVRational){1, 30};
-			strm->avg_frame_rate = (AVRational){30, 1};
+			strm->time_base = (AVRational){1, FPS};
+			strm->avg_frame_rate = (AVRational){FPS, 1};
 			auto		*pc = avcodec_alloc_context3(penc);
 			std::unique_ptr<AVCodecContext, void(*)(AVCodecContext*)>	ocodec(pc, [](AVCodecContext* p){ if(p) avcodec_free_context(&p); });
 			// setup additinal info about codec
 			ocodec->pix_fmt  = AV_PIX_FMT_YUV420P;
-			//ocodec->bit_rate = 400000;
+			ocodec->bit_rate = 40*1000*1000;
 			ocodec->width = 3440;
 			ocodec->height = 1440;
-			ocodec->time_base = (AVRational){1, 30};
-			ocodec->framerate = (AVRational){30, 1};
+			ocodec->time_base = (AVRational){1, FPS};
+			ocodec->framerate = (AVRational){FPS, 1};
 			ocodec->gop_size = 12;
 			ocodec->max_b_frames = 1;
 			// fix about global headers
