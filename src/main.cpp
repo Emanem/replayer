@@ -194,8 +194,10 @@ int main(int argc, char *argv[]) {
 			//ocodec->bit_rate = 400000;
 			ocodec->width = 3440;
 			ocodec->height = 1440;
-			ocodec->time_base = (AVRational){1, 60};
-			ocodec->framerate = (AVRational){60, 1};
+			ocodec->time_base = (AVRational){1, 30};
+			ocodec->framerate = (AVRational){30, 1};
+			//ocodec->gop_size = 3;
+			ocodec->max_b_frames = 1;
 			// fix about global headers
 			if(octx->oformat->flags & AVFMT_GLOBALHEADER)
 				octx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -230,6 +232,7 @@ int main(int argc, char *argv[]) {
 			averror(av_image_fill_arrays(oframe->data, oframe->linesize, video_buffer, AV_PIX_FMT_YUV420P, ocodec->width, ocodec->height, 1));
 			// main loop
 			// write all frames
+			int	written_frames = 0;
 			while(true) {
 				frame_holder*	fh = 0;
 				if(!c_deq.pop(fh)) {
@@ -247,6 +250,7 @@ int main(int argc, char *argv[]) {
 				averror(avcodec_encode_video2(ocodec.get(), &outp, oframe.get(), &got_pic));
 				if(got_pic) {
 					averror(av_write_frame(octx.get(), &outp));
+					++written_frames;
 				}
 				av_packet_unref(&outp);
 				//
@@ -255,6 +259,7 @@ int main(int argc, char *argv[]) {
 			}
 			// close off all the streams
 			averror(av_write_trailer(octx.get()));
+			std::cout << "Written " << written_frames << " frames" << std::endl;
 		};
 		std::thread			f_writer(
 			[&fn_write]() -> void {
