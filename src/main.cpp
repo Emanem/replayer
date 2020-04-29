@@ -177,9 +177,12 @@ int main(int argc, char *argv[]) {
 		frame_buffers			frame_bufs(16);
 		std::atomic<bool>		run(true);
 		auto				fn_write = [&c_deq, &run, &ccodec]() -> void {
-			const char	*outfile = "output.mp4";
+			const char	*outfile = "output.mkv";
+			AVOutputFormat  *ofmt = av_guess_format(0, outfile, 0);
+			if(!ofmt)
+				throw std::runtime_error("av_guess_format");
 			AVFormatContext	*octx_ = 0;
-			averror(avformat_alloc_output_context2(&octx_, 0, 0, outfile));
+			averror(avformat_alloc_output_context2(&octx_, ofmt, 0, outfile));
 			std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	octx(octx_, [](AVFormatContext* p){ if(p) avformat_close_input(&p); });
 			AVStream	*strm = avformat_new_stream(octx.get(), 0);
 			if(!strm)
@@ -205,6 +208,8 @@ int main(int argc, char *argv[]) {
 			averror(avcodec_open2(ocodec.get(), penc, 0));
 			// fill in the context parameters
 			averror(avcodec_parameters_from_context(strm->codecpar, ocodec.get()));
+			strm->time_base = ocodec->time_base;
+			strm->avg_frame_rate = ocodec->framerate;
 			// in case we have to create a file, do it...
 			if(!(octx->flags & AVFMT_NOFILE)) {
 				averror(avio_open2(&octx->pb , outfile , AVIO_FLAG_WRITE, 0, 0));
@@ -230,9 +235,12 @@ int main(int argc, char *argv[]) {
 			const int	nbytes = av_image_get_buffer_size(ocodec->pix_fmt, ocodec->width, ocodec->height, 32);
 			uint8_t		video_buffer[nbytes];
 			averror(av_image_fill_arrays(oframe->data, oframe->linesize, video_buffer, AV_PIX_FMT_YUV420P, ocodec->width, ocodec->height, 1));
+			// packet, reference
+			std::unique_ptr<AVPacket, void(*)(AVPacket*)>	opkt(av_packet_alloc(), [](AVPacket* p){ if(p) av_packet_free(&p); });
 			// main loop
 			// write all frames
 			int	written_frames = 0;
+			int64_t	iter = 1;
 			while(true) {
 				frame_holder*	fh = 0;
 				if(!c_deq.pop(fh)) {
@@ -241,22 +249,27 @@ int main(int argc, char *argv[]) {
 					continue;
 				}
 				// TODO Use newer API
-				AVPacket	outp = {0};
 				sws_scale(swsctx, fh->frame->data, fh->frame->linesize, 0, ocodec->height, oframe->data, oframe->linesize);
-				av_init_packet(&outp);
-				outp.data = 0;
-				outp.size = 0;
-				int	got_pic = 0;
-				averror(avcodec_encode_video2(ocodec.get(), &outp, oframe.get(), &got_pic));
-				if(got_pic) {
-					averror(av_write_frame(octx.get(), &outp));
+				oframe->pts = iter++;
+				averror(avcodec_send_frame(ocodec.get(), oframe.get()));
+				const int	rv = avcodec_receive_packet(ocodec.get(), opkt.get());
+				if(rv == AVERROR(EAGAIN) || rv == AVERROR_EOF)
+            				continue;
+				if(rv < 0)
+					averror(rv);
+				else {
+					averror(av_write_frame(octx.get(), opkt.get()));
+					av_packet_unref(opkt.get());
 					++written_frames;
 				}
-				av_packet_unref(&outp);
-				//
 				av_frame_unref(fh->frame.get());
 				fh->release();
 			}
+			// one last step to close the file
+			averror(avcodec_send_frame(ocodec.get(), 0));
+			avcodec_receive_packet(ocodec.get(), opkt.get());
+			averror(av_write_frame(octx.get(), opkt.get()));
+			av_packet_unref(opkt.get());
 			// close off all the streams
 			averror(av_write_trailer(octx.get()));
 			std::cout << "Written " << written_frames << " frames" << std::endl;
