@@ -21,10 +21,29 @@
 #include "utils.h"
 #include "writer.h"
 #include <thread>
+#include <fstream>
+
+extern "C" {
+	extern AVInputFormat ff_xcompgrab_demuxer;
+}
 
 int main(int argc, char *argv[]) {
 	try {
 		using namespace utils;
+
+		AVFormatContext	*ctx;
+		AVPacket	pkt = {0};
+		ctx.priv_data = std::malloc(ff_xcompgrab_demuxer.priv_data_size);
+		ff_xcompgrab_demuxer.read_header(&ctx);
+		//avformat_open_input(&ctx, "", &ff_xcompgrab_demuxer, 0);
+		ff_xcompgrab_demuxer.read_packet(ctx, &pkt);
+		{
+			std::ofstream ppm("out.ppm");
+			ppm << "P3\n";
+			//ppm << ctx.width << " " << ctx.height << '\n';
+		}
+		ff_xcompgrab_demuxer.read_close(ctx);
+
 		// Initial setup
 		av_register_all();
 		avdevice_register_all();
@@ -44,7 +63,7 @@ int main(int argc, char *argv[]) {
 		// this is not great... but still
 		av_dict_free(&opt);
 		// embed in a unique_ptr to leverage RAII
-		std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	fctx(fctx_, [](AVFormatContext* p){ if(p) avformat_free_context(p); });
+		std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	fctx(fctx_, [](AVFormatContext* p){ if(p) avformat_close_input(&p); });
 		// need to allocate a decoder for the
 		// video stream
 		// 1. find the video stream
