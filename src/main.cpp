@@ -48,7 +48,8 @@ int main(int argc, char *argv[]) {
 				ppm << (int)data[0] << " " << (int)data[1] << " " << (int)data[2] << '\n';
 			}
 		}
-		ff_xcompgrab_demuxer.read_close(ctx);
+		avformat_close_input(&ctx);
+		return 0;
 
 		// Initial setup
 		av_register_all();

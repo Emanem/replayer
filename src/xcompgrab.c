@@ -36,8 +36,8 @@ typedef struct XCompGrabCtx {
 	Window			win_capture;
 	Pixmap			win_pixmap;
 	XWindowAttributes	win_attr;
+	GLXContext		gl_ctx;
 	GLXPixmap		gl_pixmap;
-	int			gl_texmap_init;
 	GLuint			gl_texmap;
 } XCompGrabCtx;
 
@@ -200,10 +200,18 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
+	c->gl_ctx = glXCreateNewContext(c->xdisplay, *cur_cfg, GLX_RGBA_TYPE, 0, 1);
+	if(!c->gl_ctx) {
+		av_log(s, AV_LOG_ERROR, "Can't invoke glXCreateNewContext!");
+		xcompgrab_read_close(s);
+		return AVERROR(ENOTSUP);
+	}
+	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	/* create gl texture in memory */
+	glEnable(GL_TEXTURE_2D);
 	glGenTextures(1, &c->gl_texmap);
-	if(!(c->gl_texmap_init = (glGetError() == GL_NO_ERROR))) {
-		av_log(s, AV_LOG_ERROR, "Can't create GL texture!");
+	if(glGetError() != GL_NO_ERROR) {
+		av_log(s, AV_LOG_ERROR, "Can't init GL texture glGenTextures!");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -250,18 +258,22 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
         	return AVERROR(ENOMEM);
     	}
 
+	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-	glBindTexture(GL_TEXTURE_2D, 0);
 	return 0;
 }
 
 static av_cold int xcompgrab_read_close(AVFormatContext *s) {
 	XCompGrabCtx	*c = s->priv_data;
 
-	if(c->gl_texmap_init) {
+	if(c->gl_texmap) {
 		glDeleteTextures(1, &c->gl_texmap);
 		c->gl_texmap = 0;
+	}
+	if(c->gl_ctx) {
+		glXDestroyContext(c->xdisplay, c->gl_ctx); 
+		c->gl_ctx = 0;
 	}
 	if(c->win_pixmap) {
 		XFreePixmap(c->xdisplay, c->win_pixmap);
