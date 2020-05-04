@@ -222,6 +222,11 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		return AVERROR(ENOTSUP);
 	}
 	glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
+	if(glGetError() != GL_NO_ERROR) {
+		av_log(s, AV_LOG_ERROR, "Can't init glXBindTexImageEXT!");
+		xcompgrab_read_close(s);
+		return AVERROR(ENOTSUP);
+	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	XFree(configs);

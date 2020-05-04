@@ -31,16 +31,22 @@ int main(int argc, char *argv[]) {
 	try {
 		using namespace utils;
 
-		AVFormatContext	*ctx;
+		AVFormatContext	*ctx = 0;
 		AVPacket	pkt = {0};
-		ctx.priv_data = std::malloc(ff_xcompgrab_demuxer.priv_data_size);
-		ff_xcompgrab_demuxer.read_header(&ctx);
-		//avformat_open_input(&ctx, "", &ff_xcompgrab_demuxer, 0);
+		//ctx.priv_data = std::malloc(ff_xcompgrab_demuxer.priv_data_size);
+		//ff_xcompgrab_demuxer.read_header(&ctx);
+		avformat_open_input(&ctx, "", &ff_xcompgrab_demuxer, 0);
+		AVStream	*st = ctx->streams[0];
 		ff_xcompgrab_demuxer.read_packet(ctx, &pkt);
 		{
 			std::ofstream ppm("out.ppm");
 			ppm << "P3\n";
-			//ppm << ctx.width << " " << ctx.height << '\n';
+			ppm << st->codecpar->width << " " << st->codecpar->height << '\n';
+			ppm << "255\n";
+			for(int i = 0; i < st->codecpar->width*st->codecpar->height; ++i) {
+				const uint8_t	*data = &pkt.buf->data[i*4];
+				ppm << (int)data[0] << " " << (int)data[1] << " " << (int)data[2] << '\n';
+			}
 		}
 		ff_xcompgrab_demuxer.read_close(ctx);
 
