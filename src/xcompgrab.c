@@ -138,6 +138,12 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
 
+	/* reset data members used for destruction */
+	c->xdisplay = 0;
+	c->win_pixmap = 0;
+	c->gl_ctx = 0;
+	c->gl_texmap = 0;
+
 	c->xdisplay = XOpenDisplay(NULL);
 	if(!c->xdisplay)
 		return AVERROR(ENOTSUP);
@@ -149,14 +155,14 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 			minor = 2;
 
 		if (!XCompositeQueryExtension(c->xdisplay, &eventBase, &errorBase)) {
-			av_log(s, AV_LOG_ERROR, "XComposite extension not supported");
+			av_log(s, AV_LOG_ERROR, "XComposite extension not supported\n");
 			xcompgrab_read_close(s);
 			return AVERROR(ENOTSUP);
 		}
 
 		XCompositeQueryVersion(c->xdisplay, &major, &minor);
 		if (major == 0 && minor < 2) {
-			av_log(s, AV_LOG_ERROR, "XComposite extension is too old: %d.%d < 0.2", major, minor);
+			av_log(s, AV_LOG_ERROR, "XComposite extension is too old: %d.%d < 0.2\n", major, minor);
 			xcompgrab_read_close(s);
 			return AVERROR(ENOTSUP);
 		}
@@ -192,7 +198,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		XFree(data);
 	}
 	if(!c->win_capture) {
-		av_log(s, AV_LOG_ERROR, "Can't find X window containing string '%s'", c->window_name);
+		av_log(s, AV_LOG_ERROR, "Can't find X window containing string '%s'\n", c->window_name);
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -203,7 +209,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	XSync(c->xdisplay, 0);
 	/* Get windows attributes */
 	if(!XGetWindowAttributes(c->xdisplay, c->win_capture, &c->win_attr)) {
-		av_log(s, AV_LOG_ERROR, "Can't retrieve window attributes!");
+		av_log(s, AV_LOG_ERROR, "Can't retrieve window attributes!\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);	
 	}
@@ -234,14 +240,14 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		break;
 	}
 	if(!cur_cfg) {
-		av_log(s, AV_LOG_ERROR, "Couldn't find a valid FBConfig");
+		av_log(s, AV_LOG_ERROR, "Couldn't find a valid FBConfig\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
 	/* Create the pixmap */
 	c->win_pixmap = XCompositeNameWindowPixmap(c->xdisplay, c->win_capture);
 	if(!c->win_pixmap) {
-		av_log(s, AV_LOG_ERROR, "Can't create Window Pixmap!");
+		av_log(s, AV_LOG_ERROR, "Can't create Window Pixmap!\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -250,13 +256,13 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 				    GLX_TEXTURE_FORMAT_RGBA_EXT, None};
 	c->gl_pixmap = glXCreatePixmap(c->xdisplay, *cur_cfg, c->win_pixmap, pixmap_attrs);
 	if(!c->gl_pixmap) {
-		av_log(s, AV_LOG_ERROR, "Can't create GL Pixmap!");
+		av_log(s, AV_LOG_ERROR, "Can't create GL Pixmap!\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
 	c->gl_ctx = glXCreateNewContext(c->xdisplay, *cur_cfg, GLX_RGBA_TYPE, 0, 1);
 	if(!c->gl_ctx) {
-		av_log(s, AV_LOG_ERROR, "Can't create new GLXContext with glXCreateNewContext!");
+		av_log(s, AV_LOG_ERROR, "Can't create new GLXContext with glXCreateNewContext!\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -265,14 +271,14 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	glEnable(GL_TEXTURE_2D);
 	glGenTextures(1, &c->gl_texmap);
 	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init GL texture glGenTextures!");
+		av_log(s, AV_LOG_ERROR, "Can't init GL texture glGenTextures!\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, c->win_attr.width, c->win_attr.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init GL texture glTexImage2D!");
+		av_log(s, AV_LOG_ERROR, "Can't init GL texture glTexImage2D!\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -281,13 +287,13 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	/* setup the bin/unbind of TexImageEXT */
 	c->glXBindTexImageEXT = (f_glXBindTexImageEXT) glXGetProcAddress((GLubyte*)"glXBindTexImageEXT");
 	if(!c->glXBindTexImageEXT) {
-		av_log(s, AV_LOG_ERROR, "Can't find 'glXBindTexImageEXT'");
+		av_log(s, AV_LOG_ERROR, "Can't find 'glXBindTexImageEXT'\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
 	c->glXReleaseTexImageEXT = (f_glXReleaseTexImageEXT) glXGetProcAddress((GLubyte*)"glXReleaseTexImageEXT");
 	if(!c->glXReleaseTexImageEXT) {
-		av_log(s, AV_LOG_ERROR, "Can't find 'glXReleaseTexImageEXT'");
+		av_log(s, AV_LOG_ERROR, "Can't find 'glXReleaseTexImageEXT'\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -336,15 +342,13 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	c->glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
 	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init glXBindTexImageEXT!");
-		xcompgrab_read_close(s);
+		av_log(s, AV_LOG_ERROR, "Can't init glXBindTexImageEXT!\n");
 		return AVERROR(ENOTSUP);
 	}
 	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 	c->glXReleaseTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT);
 	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init glXReleaseTexImageEXT!");
-		xcompgrab_read_close(s);
+		av_log(s, AV_LOG_ERROR, "Can't init glXReleaseTexImageEXT!\n");
 		return AVERROR(ENOTSUP);
 	}
 
@@ -354,15 +358,17 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 static av_cold int xcompgrab_read_close(AVFormatContext *s) {
 	XCompGrabCtx	*c = s->priv_data;
 
-	if(c->gl_texmap) {
+	if(c->gl_texmap && c->xdisplay && c->gl_pixmap && c->gl_ctx) {
+		glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 		glDeleteTextures(1, &c->gl_texmap);
 		c->gl_texmap = 0;
 	}
-	if(c->gl_ctx) {
+	if(c->gl_ctx && c->xdisplay) {
+		glXMakeCurrent(c->xdisplay, None, 0);
 		glXDestroyContext(c->xdisplay, c->gl_ctx); 
 		c->gl_ctx = 0;
 	}
-	if(c->win_pixmap) {
+	if(c->win_pixmap && c->xdisplay) {
 		XFreePixmap(c->xdisplay, c->win_pixmap);
 		c->win_pixmap = 0;
 	}

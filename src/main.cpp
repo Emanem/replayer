@@ -91,7 +91,7 @@ int main(int argc, char *argv[]) {
 		AVFormatContext	*fctx_ = 0;
 		AVDictionary	*opt = 0;
 		av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
-		av_dict_set(&opt, "window_name", "Firefox", 0);
+		av_dict_set(&opt, "window_name", (argc > 1) ? argv[1] : "Firefox", 0);
 		averror(avformat_open_input(&fctx_, "", xcompformat, &opt));
 		// this is not great... but still
 		av_dict_free(&opt);
