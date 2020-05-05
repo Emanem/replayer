@@ -54,7 +54,15 @@ static void avpriv_set_pts_info(AVStream *s, int pts_wrap_bits, unsigned int pts
 	s->pts_wrap_bits = pts_wrap_bits;
 }
 
+typedef void (*f_glXBindTexImageEXT)(Display *, GLXDrawable, int, int *);
+typedef void (*f_glXReleaseTexImageEXT)(Display *, GLXDrawable, int);
+
+/* this type has to have the first member
+ * as a AVClass*, otherwise it will
+ * lead to a crash
+ */
 typedef struct XCompGrabCtx {
+	const AVClass 		*class;
 	Display			*xdisplay;
 	Window			win_capture;
 	Pixmap			win_pixmap;
@@ -67,6 +75,8 @@ typedef struct XCompGrabCtx {
 	int64_t			time_frame;
 	AVRational		time_base;
 	int64_t			frame_duration;
+	f_glXBindTexImageEXT	glXBindTexImageEXT;
+	f_glXReleaseTexImageEXT	glXReleaseTexImageEXT;
 } XCompGrabCtx;
 
 #define OFFSET(x) offsetof(XCompGrabCtx, x)
@@ -266,21 +276,21 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
-	/* find ... */
-	void (*glXBindTexImageEXT)(Display *, GLXDrawable, int, int *) = (void (*)(Display *, GLXDrawable, int, int *)) glXGetProcAddress((GLubyte*)"glXBindTexImageEXT");
-	if(!glXBindTexImageEXT) {
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	/* setup the bin/unbind of TexImageEXT */
+	c->glXBindTexImageEXT = (f_glXBindTexImageEXT) glXGetProcAddress((GLubyte*)"glXBindTexImageEXT");
+	if(!c->glXBindTexImageEXT) {
 		av_log(s, AV_LOG_ERROR, "Can't find 'glXBindTexImageEXT'");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
-	glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
-	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init glXBindTexImageEXT!");
+	c->glXReleaseTexImageEXT = (f_glXReleaseTexImageEXT) glXGetProcAddress((GLubyte*)"glXReleaseTexImageEXT");
+	if(!c->glXReleaseTexImageEXT) {
+		av_log(s, AV_LOG_ERROR, "Can't find 'glXReleaseTexImageEXT'");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	XFree(configs);
 	rv = init_pvt_stream(s);
 	if(rv < 0) {
@@ -324,7 +334,19 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
+	c->glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
+	if(glGetError() != GL_NO_ERROR) {
+		av_log(s, AV_LOG_ERROR, "Can't init glXBindTexImageEXT!");
+		xcompgrab_read_close(s);
+		return AVERROR(ENOTSUP);
+	}
 	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+	c->glXReleaseTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT);
+	if(glGetError() != GL_NO_ERROR) {
+		av_log(s, AV_LOG_ERROR, "Can't init glXReleaseTexImageEXT!");
+		xcompgrab_read_close(s);
+		return AVERROR(ENOTSUP);
+	}
 
 	return 0;
 }

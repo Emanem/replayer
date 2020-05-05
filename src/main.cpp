@@ -27,11 +27,24 @@ extern "C" {
 	extern AVInputFormat ff_xcompgrab_demuxer;
 }
 
+namespace {
+	void ppm_write(AVStream *st, AVPacket& pkt, int seq) {
+		std::ofstream ppm((std::string("out") + std::to_string(seq) + ".ppm").c_str());
+		ppm << "P3\n";
+		ppm << st->codecpar->width << " " << st->codecpar->height << '\n';
+		ppm << "255\n";
+		for(int i = 0; i < st->codecpar->width*st->codecpar->height; ++i) {
+			const uint8_t	*data = &pkt.buf->data[i*4];
+			ppm << (int)data[0] << " " << (int)data[1] << " " << (int)data[2] << '\n';
+		}
+	}
+}
+
 int main(int argc, char *argv[]) {
 	try {
 		using namespace utils;
 
-		AVFormatContext	*ctx = 0;
+		/*AVFormatContext	*ctx = 0;
 		AVPacket	pkt = {0};
 		AVDictionary	*opt_ = 0;
 		av_dict_set(&opt_, "framerate", "60", 0);
@@ -51,7 +64,7 @@ int main(int argc, char *argv[]) {
 			}
 		}
 		avformat_close_input(&ctx);
-		return 0;
+		return 0;*/
 
 		// Initial setup
 		av_register_all();
@@ -60,7 +73,7 @@ int main(int argc, char *argv[]) {
 		const int	FPS = 30;
 		// HW decode sample https://ffmpeg.org/doxygen/3.4/hw__decode_8c_source.html
 		// get X11
-		auto*	x11format = av_find_input_format("x11grab");
+		/*auto*	x11format = av_find_input_format("x11grab");
 		if(!x11format)
 			throw std::runtime_error("av_find_input_format - can't find 'x11grab'");
 		// open x11grab
@@ -69,6 +82,17 @@ int main(int argc, char *argv[]) {
 		av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
 		av_dict_set(&opt, "video_size", "3440x1440", 0);
 		averror(avformat_open_input(&fctx_, ":0.0", x11format, &opt));
+		// this is not great... but still
+		av_dict_free(&opt);*/
+		auto*	xcompformat = &ff_xcompgrab_demuxer;
+		if(!xcompformat)
+			throw std::runtime_error("av_find_input_format - can't find 'xcompgrab'");
+		// open x11grab
+		AVFormatContext	*fctx_ = 0;
+		AVDictionary	*opt = 0;
+		av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
+		av_dict_set(&opt, "window_name", "Firefox", 0);
+		averror(avformat_open_input(&fctx_, "", xcompformat, &opt));
 		// this is not great... but still
 		av_dict_free(&opt);
 		// embed in a unique_ptr to leverage RAII
@@ -117,6 +141,7 @@ int main(int argc, char *argv[]) {
 		// embed in a unique_ptr to leverage RAII
 		while(av_read_frame(fctx.get(), &packet) >= 0) {
 			if(vstream == packet.stream_index) {
+				//ppm_write(fctx->streams[vstream], packet, cur_frame);
 				averror(avcodec_send_packet(ccodec.get(), &packet));
 				while(1) {
 					// get a frame
