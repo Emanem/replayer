@@ -18,6 +18,7 @@
 #include <libavformat/avformat.h>
 #include <libavdevice/avdevice.h>
 #include <libavutil/parseutils.h>
+#include <libavutil/time.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
@@ -63,6 +64,9 @@ typedef struct XCompGrabCtx {
 	GLuint			gl_texmap;
 	const char 		*framerate;
 	const char		*window_name;
+	int64_t			time_frame;
+	AVRational		time_base;
+	int64_t			frame_duration;
 } XCompGrabCtx;
 
 #define OFFSET(x) offsetof(XCompGrabCtx, x)
@@ -109,6 +113,14 @@ static int init_pvt_stream(AVFormatContext *s) {
 	st->codecpar->width = c->win_attr.width;
 	st->codecpar->height = c->win_attr.height;
 	st->codecpar->bit_rate = av_rescale(32*c->win_attr.width*c->win_attr.height, st->avg_frame_rate.num, st->avg_frame_rate.den);
+	/* useful to determine the sleep interval */
+	/* TODO: verify why we need time_base and
+	 * frame_duration ... after all we already
+	 * have st->avg_frame_rate, right?
+	 */
+	c->time_base  = (AVRational){ st->avg_frame_rate.den, st->avg_frame_rate.num};
+	c->frame_duration = av_rescale_q(1, c->time_base, AV_TIME_BASE_Q);
+	c->time_frame = av_gettime();
 	return 0;
 }
 
@@ -285,18 +297,35 @@ static void my_free(void* opaque, uint8_t* data) {
 
 static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	XCompGrabCtx	*c = s->priv_data;
-
+	int64_t 	pts = 0,
+			delay = 0;
 	int		length = c->win_attr.width * c->win_attr.height * sizeof(uint8_t) * 4;
+	uint8_t		*data = 0;
+
+	/* wait enough time */
+	c->time_frame += c->frame_duration;
+	while(1) {
+		pts = av_gettime();
+		delay = c->time_frame - pts;
+		if (delay <= 0)
+			break;
+		av_usleep(delay);
+	}
 	av_init_packet(pkt);
-	uint8_t		*data = (uint8_t*)malloc(length);
+	data = (uint8_t*)malloc(length);
 	pkt->buf = av_buffer_create(data, length, my_free, 0, 0);
     	if (!pkt->buf) {
         	return AVERROR(ENOMEM);
     	}
+	pkt->dts = pkt->pts = pts;
+	pkt->duration = c->frame_duration;
+	pkt->data = data;
+	pkt->size = length;
 
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+
 	return 0;
 }
 
