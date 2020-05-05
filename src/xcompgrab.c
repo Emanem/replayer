@@ -17,6 +17,7 @@
 
 #include <libavformat/avformat.h>
 #include <libavdevice/avdevice.h>
+#include <libavutil/parseutils.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
@@ -31,6 +32,27 @@
  * https://github.com/obsproject/obs-studio/blob/master/plugins/linux-capture/xcompcap-helper.cpp
  */
 
+/* TODO: We should include
+ * #include <libavformat/internal.h>
+ * And then remove the below code, should use
+ * properly defined 'avpriv_set_pts_info'
+ */
+static void avpriv_set_pts_info(AVStream *s, int pts_wrap_bits, unsigned int pts_num, unsigned int pts_den) {
+	AVRational new_tb;
+	if (av_reduce(&new_tb.num, &new_tb.den, pts_num, pts_den, INT_MAX)) {
+		if (new_tb.num != pts_num)
+			av_log(NULL, AV_LOG_DEBUG, "st:%d removing common factor %d from timebase\n", s->index, pts_num / new_tb.num);
+	} else av_log(NULL, AV_LOG_WARNING, "st:%d has too large timebase, reducing\n", s->index);
+
+	if (new_tb.num <= 0 || new_tb.den <= 0) {
+		av_log(NULL, AV_LOG_ERROR, "Ignoring attempt to set invalid timebase %d/%d for st:%d\n", new_tb.num, new_tb.den, s->index);
+		return;
+	}
+	s->time_base     = new_tb;
+	//s->internal->avctx->pkt_timebase = new_tb;
+	s->pts_wrap_bits = pts_wrap_bits;
+}
+
 typedef struct XCompGrabCtx {
 	Display			*xdisplay;
 	Window			win_capture;
@@ -39,9 +61,16 @@ typedef struct XCompGrabCtx {
 	GLXContext		gl_ctx;
 	GLXPixmap		gl_pixmap;
 	GLuint			gl_texmap;
+	const char 		*framerate;
+	const char		*window_name;
 } XCompGrabCtx;
 
+#define OFFSET(x) offsetof(XCompGrabCtx, x)
+#define D AV_OPT_FLAG_DECODING_PARAM
+
 static const AVOption options[] = {
+	{ "framerate", "", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = "ntsc" }, 0, 0, D },
+	{ "window_name", "", OFFSET(window_name), AV_OPT_TYPE_STRING, {.str = "Desktop" }, 0, 0, D },
 	{ NULL },
 };
 
@@ -63,24 +92,28 @@ static int get_root_window_screen(Display *xdisplay, Window root) {
 	return XScreenNumberOfScreen(attr.screen);
 }
 
-static int create_pvt_stream(AVFormatContext *s) {
+static int init_pvt_stream(AVFormatContext *s) {
+	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
 
 	AVStream	*st = avformat_new_stream(s, NULL);
 	if (!st)
         	return AVERROR(ENOMEM);
-	/* need to setup st->avg_frame_rate */
-	/* avpriv_set_pts_info(st, 64, 1, 1000000); */
+	rv = av_parse_video_rate(&st->avg_frame_rate, c->framerate);
+	if(rv < 0)
+		return rv;
+	avpriv_set_pts_info(st, 64, 1, 1000000);
 	st->codecpar->format = AV_PIX_FMT_RGBA;
 	st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
 	st->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
 	st->codecpar->width = c->win_attr.width;
 	st->codecpar->height = c->win_attr.height;
-	/*st->codecpar->bit_rate = av_rescale(frame_size_bits, st->avg_frame_rate.num, st->avg_frame_rate.den);*/
+	st->codecpar->bit_rate = av_rescale(32*c->win_attr.width*c->win_attr.height, st->avg_frame_rate.num, st->avg_frame_rate.den);
 	return 0;
 }
 
 static av_cold int xcompgrab_read_header(AVFormatContext *s) {
+	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
 
 	c->xdisplay = XOpenDisplay(NULL);
@@ -107,7 +140,6 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		}
 	}
 	/* find the window name */
-	const char *WINDOW_NAME = "Firefox";
 	{
 		Window		rootWindow = RootWindow(c->xdisplay, DefaultScreen(c->xdisplay));
     		Atom		atom = XInternAtom(c->xdisplay, "_NET_CLIENT_LIST", 1);
@@ -125,8 +157,8 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		if (status >= Success && numItems) {
         		for (int i = 0; i < numItems; ++i) {
             			status = XFetchName(c->xdisplay, list[i], &win_name);
-            			if (status >= Success) {
-                			if (strstr(win_name, WINDOW_NAME)) {
+            			if (status >= Success && win_name) {
+                			if (strstr(win_name, c->window_name)) {
                     				c->win_capture = list[i];
 						XFree(win_name);
                     				break;
@@ -138,7 +170,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		XFree(data);
 	}
 	if(!c->win_capture) {
-		av_log(s, AV_LOG_ERROR, "Can't find X window containing string '%s'", WINDOW_NAME);
+		av_log(s, AV_LOG_ERROR, "Can't find X window containing string '%s'", c->window_name);
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -202,7 +234,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	}
 	c->gl_ctx = glXCreateNewContext(c->xdisplay, *cur_cfg, GLX_RGBA_TYPE, 0, 1);
 	if(!c->gl_ctx) {
-		av_log(s, AV_LOG_ERROR, "Can't invoke glXCreateNewContext!");
+		av_log(s, AV_LOG_ERROR, "Can't create new GLXContext with glXCreateNewContext!");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
@@ -238,7 +270,11 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	XFree(configs);
-	create_pvt_stream(s);
+	rv = init_pvt_stream(s);
+	if(rv < 0) {
+		xcompgrab_read_close(s);
+		return rv;
+	}
 	return 0;
 }
 

@@ -33,9 +33,11 @@ int main(int argc, char *argv[]) {
 
 		AVFormatContext	*ctx = 0;
 		AVPacket	pkt = {0};
-		//ctx.priv_data = std::malloc(ff_xcompgrab_demuxer.priv_data_size);
-		//ff_xcompgrab_demuxer.read_header(&ctx);
-		avformat_open_input(&ctx, "", &ff_xcompgrab_demuxer, 0);
+		AVDictionary	*opt_ = 0;
+		av_dict_set(&opt_, "framerate", "60", 0);
+		av_dict_set(&opt_, "window_name", "Firefox", 0);
+		avformat_open_input(&ctx, "", &ff_xcompgrab_demuxer, &opt_);
+		av_dict_free(&opt_);
 		AVStream	*st = ctx->streams[0];
 		ff_xcompgrab_demuxer.read_packet(ctx, &pkt);
 		{
