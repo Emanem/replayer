@@ -121,8 +121,37 @@ static int pvt_check_comp_support(AVFormatContext *s, XCompGrabCtx *c) {
 		av_log(s, AV_LOG_ERROR, "XComposite extension is too old: %d.%d < 0.2\n", major, minor);
 		return AVERROR(ENOTSUP);
 	}
-
 	return 0;
+}
+
+static int pvt_find_window(Display *xdisplay, const char *target, Window* out) {
+	Window		rootWindow = RootWindow(xdisplay, DefaultScreen(xdisplay));
+	Atom		atom = XInternAtom(xdisplay, "_NET_CLIENT_LIST", 1);
+	Atom		actualType;
+	int		format;
+	unsigned long	numItems,
+			bytesAfter;
+	unsigned char	*data = '\0';
+	Window 		*list;    
+	char		*win_name = 0;
+	int		status = XGetWindowProperty(xdisplay, rootWindow, atom, 0L, (~0L), 0,
+				AnyPropertyType, &actualType, &format, &numItems, &bytesAfter, &data);
+	list = (Window *)data;
+	if (status >= Success && numItems) {
+		for (int i = 0; i < numItems; ++i) {
+			status = XFetchName(xdisplay, list[i], &win_name);
+			if (status >= Success && win_name) {
+				if (strstr(win_name, target)) {
+					XFree(win_name);
+					XFree(data);
+					*out = list[i];
+					return 0;
+				} else XFree(win_name);
+			}
+		}
+	}
+	XFree(data);
+	return -1;
 }
 
 static int pvt_init_stream(AVFormatContext *s) {
@@ -172,39 +201,10 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		return rv;
 	}
 	/* find the window name */
-	{
-		Window		rootWindow = RootWindow(c->xdisplay, DefaultScreen(c->xdisplay));
-    		Atom		atom = XInternAtom(c->xdisplay, "_NET_CLIENT_LIST", 1);
-    		Atom		actualType;
-    		int		format;
-    		unsigned long	numItems,
-    				bytesAfter;
-		unsigned char	*data = '\0';
-    		Window 		*list;    
-    		char		*win_name = 0;
-		c->win_capture = 0;
-		int		status = XGetWindowProperty(c->xdisplay, rootWindow, atom, 0L, (~0L), 0,
-        				AnyPropertyType, &actualType, &format, &numItems, &bytesAfter, &data);
-    		list = (Window *)data;
-		if (status >= Success && numItems) {
-        		for (int i = 0; i < numItems; ++i) {
-            			status = XFetchName(c->xdisplay, list[i], &win_name);
-            			if (status >= Success && win_name) {
-                			if (strstr(win_name, c->window_name)) {
-                    				c->win_capture = list[i];
-						XFree(win_name);
-                    				break;
-                			}
-					else XFree(win_name);
-            			}
-        		}
-    		}
-		XFree(data);
-	}
-	if(!c->win_capture) {
+	if(pvt_find_window(c->xdisplay, c->window_name, &c->win_capture) < 0) {
 		av_log(s, AV_LOG_ERROR, "Can't find X window containing string '%s'\n", c->window_name);
 		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		return AVERROR(EINVAL);
 	}
 	/* TODO: we should manage errors! */
 	XCompositeRedirectWindow(c->xdisplay, c->win_capture, CompositeRedirectAutomatic);
