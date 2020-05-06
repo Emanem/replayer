@@ -106,7 +106,26 @@ static int get_root_window_screen(Display *xdisplay, Window root) {
 	return XScreenNumberOfScreen(attr.screen);
 }
 
-static int init_pvt_stream(AVFormatContext *s) {
+static int pvt_check_comp_support(AVFormatContext *s, XCompGrabCtx *c) {
+	int	eventBase,
+		errorBase,
+		major = 0,
+		minor = 2;
+
+	if (!XCompositeQueryExtension(c->xdisplay, &eventBase, &errorBase)) {
+		av_log(s, AV_LOG_ERROR, "XComposite extension not supported\n");
+		return AVERROR(ENOTSUP);
+	}
+	XCompositeQueryVersion(c->xdisplay, &major, &minor);
+	if (major == 0 && minor < 2) {
+		av_log(s, AV_LOG_ERROR, "XComposite extension is too old: %d.%d < 0.2\n", major, minor);
+		return AVERROR(ENOTSUP);
+	}
+
+	return 0;
+}
+
+static int pvt_init_stream(AVFormatContext *s) {
 	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
 
@@ -146,26 +165,11 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 
 	c->xdisplay = XOpenDisplay(NULL);
 	if(!c->xdisplay)
-		return AVERROR(ENOTSUP);
+		return AVERROR(ENODEV);
 	/* check composite extension is supported */
-	{
-		int	eventBase,
-			errorBase,
-			major = 0,
-			minor = 2;
-
-		if (!XCompositeQueryExtension(c->xdisplay, &eventBase, &errorBase)) {
-			av_log(s, AV_LOG_ERROR, "XComposite extension not supported\n");
-			xcompgrab_read_close(s);
-			return AVERROR(ENOTSUP);
-		}
-
-		XCompositeQueryVersion(c->xdisplay, &major, &minor);
-		if (major == 0 && minor < 2) {
-			av_log(s, AV_LOG_ERROR, "XComposite extension is too old: %d.%d < 0.2\n", major, minor);
-			xcompgrab_read_close(s);
-			return AVERROR(ENOTSUP);
-		}
+	if((rv = pvt_check_comp_support(s, c)) < 0) {
+		xcompgrab_read_close(s);
+		return rv;
 	}
 	/* find the window name */
 	{
@@ -298,7 +302,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		return AVERROR(ENOTSUP);
 	}
 	XFree(configs);
-	rv = init_pvt_stream(s);
+	rv = pvt_init_stream(s);
 	if(rv < 0) {
 		xcompgrab_read_close(s);
 		return rv;
