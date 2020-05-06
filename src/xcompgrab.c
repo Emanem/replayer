@@ -182,6 +182,43 @@ static int pvt_init_stream(AVFormatContext *s) {
 	return 0;
 }
 
+static int pvt_check_gl_error(AVFormatContext *s, const char* desc) {
+	switch(glGetError()) {
+		case GL_NO_ERROR:
+			return 0;
+		case GL_INVALID_ENUM:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_INVALID_ENUM!\n", desc);
+			return -1;
+		case GL_INVALID_VALUE:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_INVALID_VALUE!\n", desc);
+			return -1;
+		case GL_INVALID_OPERATION:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_INVALID_OPERATION!\n", desc);
+			return -1;
+		case GL_STACK_OVERFLOW:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_STACK_OVERFLOW!\n", desc);
+			return -1;
+		case GL_STACK_UNDERFLOW:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_STACK_UNDERFLOW!\n", desc);
+			return -1;
+		case GL_OUT_OF_MEMORY:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_OUT_OF_MEMORY!\n", desc);
+			return -1;
+		case GL_INVALID_FRAMEBUFFER_OPERATION:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_INVALID_FRAMEBUFFER_OPERATION!\n", desc);
+			return -1;
+		case GL_CONTEXT_LOST:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_CONTEXT_LOST!\n", desc);
+			return -1;
+		case GL_TABLE_TOO_LARGE:
+			av_log(s, AV_LOG_ERROR, "GL error: %s GL_TABLE_TOO_LARGE!\n", desc);
+			return -1;
+		default:
+			break;
+	}
+	return -2;
+}
+
 static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
@@ -246,6 +283,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	if(!cur_cfg) {
 		av_log(s, AV_LOG_ERROR, "Couldn't find a valid FBConfig\n");
 		xcompgrab_read_close(s);
+		XFree(configs);
 		return AVERROR(ENOTSUP);
 	}
 	/* Create the pixmap */
@@ -253,6 +291,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	if(!c->win_pixmap) {
 		av_log(s, AV_LOG_ERROR, "Can't create Window Pixmap!\n");
 		xcompgrab_read_close(s);
+		XFree(configs);
 		return AVERROR(ENOTSUP);
 	}
 	const int pixmap_attrs[] = {GLX_TEXTURE_TARGET_EXT, GLX_TEXTURE_2D_EXT,
@@ -262,46 +301,46 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	if(!c->gl_pixmap) {
 		av_log(s, AV_LOG_ERROR, "Can't create GL Pixmap!\n");
 		xcompgrab_read_close(s);
+		XFree(configs);
 		return AVERROR(ENOTSUP);
 	}
 	c->gl_ctx = glXCreateNewContext(c->xdisplay, *cur_cfg, GLX_RGBA_TYPE, 0, 1);
 	if(!c->gl_ctx) {
 		av_log(s, AV_LOG_ERROR, "Can't create new GLXContext with glXCreateNewContext!\n");
 		xcompgrab_read_close(s);
+		XFree(configs);
 		return AVERROR(ENOTSUP);
 	}
+	XFree(configs);
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	/* create gl texture in memory */
 	glEnable(GL_TEXTURE_2D);
 	glGenTextures(1, &c->gl_texmap);
-	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init GL texture glGenTextures!\n");
+	if(pvt_check_gl_error(s, "glGenTextures") < 0) {
 		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		return AVERROR(EINVAL);
 	}
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, c->win_attr.width, c->win_attr.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init GL texture glTexImage2D!\n");
+	if(pvt_check_gl_error(s, "glTexImage2D") < 0) {
 		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		return AVERROR(EINVAL);
 	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	/* setup the bin/unbind of TexImageEXT */
 	c->glXBindTexImageEXT = (f_glXBindTexImageEXT) glXGetProcAddress((GLubyte*)"glXBindTexImageEXT");
 	if(!c->glXBindTexImageEXT) {
-		av_log(s, AV_LOG_ERROR, "Can't find 'glXBindTexImageEXT'\n");
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXBindTexImageEXT'\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
 	c->glXReleaseTexImageEXT = (f_glXReleaseTexImageEXT) glXGetProcAddress((GLubyte*)"glXReleaseTexImageEXT");
 	if(!c->glXReleaseTexImageEXT) {
-		av_log(s, AV_LOG_ERROR, "Can't find 'glXReleaseTexImageEXT'\n");
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXReleaseTexImageEXT'\n");
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
-	XFree(configs);
 	rv = pvt_init_stream(s);
 	if(rv < 0) {
 		xcompgrab_read_close(s);
@@ -345,17 +384,16 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	c->glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
-	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init glXBindTexImageEXT!\n");
-		return AVERROR(ENOTSUP);
+	if(pvt_check_gl_error(s, "glXBindTexImageEXT") < 0) {
+		av_log(s, AV_LOG_FATAL, "No being able to execute glXBindTexImageEXT will lead to corrupted stream capture\n");
+		return AVERROR(EINVAL);
 	}
 	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 	c->glXReleaseTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT);
-	if(glGetError() != GL_NO_ERROR) {
-		av_log(s, AV_LOG_ERROR, "Can't init glXReleaseTexImageEXT!\n");
-		return AVERROR(ENOTSUP);
+	if(pvt_check_gl_error(s, "glXReleaseTexImageEXT") < 0) {
+		av_log(s, AV_LOG_FATAL, "No being able to execute glXReleaseTexImageEXT will lead to corrupted stream capture\n");
+		return AVERROR(EINVAL);
 	}
-
 	return 0;
 }
 
