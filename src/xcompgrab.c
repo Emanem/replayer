@@ -54,6 +54,80 @@ static void avpriv_set_pts_info(AVStream *s, int pts_wrap_bits, unsigned int pts
 	s->pts_wrap_bits = pts_wrap_bits;
 }
 
+/* struct used for buffer allocation */
+typedef struct XCompGrabSlice {
+	int	used;
+	uint8_t	buf[1];
+} XCompGrabSlice;
+
+typedef struct XCompGrabBuffer {
+	int		n_slices;
+	XCompGrabSlice	*slices;
+} XCompGrabBuffer;
+
+/* Utility functions to allocate/free memory */
+static uint8_t* pvt_alloc(int sz) {
+	return (uint8_t*)malloc(sz);
+}
+
+static void pvt_free(void* opaque, uint8_t* data) {
+	if(data)
+		free(data);
+}
+
+static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCompGrabBuffer* out) {
+	if(n_slices <= 0) {
+		av_log(s, AV_LOG_ERROR, "Invalid number of slices for internal memory buffer (%d)\n", n_slices);
+		return AVERROR(ENOTSUP);
+	}
+	// allocate enough space for slices
+	out->slices = (XCompGrabSlice*)malloc(n_slices*(sizeof(XCompGrabSlice) + ((n_bytes-1)*sizeof(uint8_t))));
+	if(!out->slices) {
+		av_log(s, AV_LOG_ERROR, "Can't initialize internal memory buffer\n");
+		return AVERROR(ENOMEM);
+	}
+	out->n_slices = n_slices;
+	// initialize those
+	for(int i = 0; i < out->n_slices; ++i) {
+		out->slices[i].used = 0;
+	}
+	return 0;
+}
+
+static void pvt_cleanup_membuffer(XCompGrabBuffer* buf) {
+	if(buf->slices)
+		free(buf->slices);
+}
+
+static uint8_t* pvt_alloc_membuffer(XCompGrabBuffer* buf) {
+	for(int i = 0; i < buf->n_slices; ++i) {
+		/* if we can atomically mark a slice as used, 
+		 * we can return its buffer
+		 */
+		if(__sync_bool_compare_and_swap(&buf->slices[i].used, 0, 1)) {
+			return buf->slices[i].buf;
+		}
+	}
+	return 0;
+}
+
+static void pvt_free_membuffer(void* opaque, uint8_t* data) {
+	XCompGrabBuffer* buf = (XCompGrabBuffer*)opaque;
+	/* first find the slice */
+	for(int i = 0; i < buf->n_slices; ++i) {
+		if(data == buf->slices[i].buf) {
+			/* then reset the buffer to used=0
+			 *  this should never fail */
+			if(!__sync_bool_compare_and_swap(&buf->slices[i].used, 1, 0)) {
+				/* We should log fatal error */
+			}
+			return;
+		}
+	}
+}
+
+
+/* Useful typedefs */
 typedef void (*f_glXBindTexImageEXT)(Display *, GLXDrawable, int, int *);
 typedef void (*f_glXReleaseTexImageEXT)(Display *, GLXDrawable, int);
 
@@ -72,11 +146,13 @@ typedef struct XCompGrabCtx {
 	GLuint			gl_texmap;
 	const char 		*framerate;
 	const char		*window_name;
+	int			use_framebuf;
 	int64_t			time_frame;
 	AVRational		time_base;
 	int64_t			frame_duration;
 	f_glXBindTexImageEXT	glXBindTexImageEXT;
 	f_glXReleaseTexImageEXT	glXReleaseTexImageEXT;
+	XCompGrabBuffer		pvt_framebuf;
 } XCompGrabCtx;
 
 #define OFFSET(x) offsetof(XCompGrabCtx, x)
@@ -84,7 +160,8 @@ typedef struct XCompGrabCtx {
 
 static const AVOption options[] = {
 	{ "framerate", "", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = "ntsc" }, 0, 0, D },
-	{ "window_name", "", OFFSET(window_name), AV_OPT_TYPE_STRING, {.str = "Desktop" }, 0, 0, D },
+	{ "window_name", "X window name/title", OFFSET(window_name), AV_OPT_TYPE_STRING, {.str = "Desktop" }, 0, 0, D },
+	{ "use_framebuf", "Use internal framebuffer to store packet data, increase memory usage for much better performance", OFFSET(use_framebuf), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, D },
 	{ NULL },
 };
 
@@ -341,6 +418,16 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);
 	}
+	/* Initialize buffer if necessary */
+	if(c->use_framebuf) {
+		av_log(s, AV_LOG_INFO, "Using internal framebuffers instead of system memory\n");
+		rv = pvt_init_membuffer(s, 8, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf);
+		if(rv < 0) {
+			xcompgrab_read_close(s);
+			return rv;
+		}
+	}
+	/* init public stream info */
 	rv = pvt_init_stream(s);
 	if(rv < 0) {
 		xcompgrab_read_close(s);
@@ -348,11 +435,6 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	}
 	return 0;
 }
-
-static void my_free(void* opaque, uint8_t* data) {
-	if(data)
-		free(data);
-}	
 
 static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	XCompGrabCtx	*c = s->priv_data;
@@ -371,8 +453,19 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 		av_usleep(delay);
 	}
 	av_init_packet(pkt);
-	data = (uint8_t*)malloc(length);
-	pkt->buf = av_buffer_create(data, length, my_free, 0, 0);
+	/* properly setup memory structures
+	 * to allocate buffer from desired
+	 * pool (malloc/pvt_membuffer)
+	 */
+	pkt->buf = 0;
+	if(!c->use_framebuf) {
+		data = pvt_alloc(length);
+		if (data) pkt->buf = av_buffer_create(data, length, pvt_free, 0, 0);
+	} else {
+		data = pvt_alloc_membuffer(&c->pvt_framebuf);
+		if (data) pkt->buf = av_buffer_create(data, length, pvt_free_membuffer, &c->pvt_framebuf, 0);
+		else av_log(s, AV_LOG_WARNING, "Warning: consumer is too slow in processing AVPacket from av_read_frame (or equivalent call)\n");
+	}
     	if (!pkt->buf) {
         	return AVERROR(ENOMEM);
     	}
@@ -400,6 +493,9 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 static av_cold int xcompgrab_read_close(AVFormatContext *s) {
 	XCompGrabCtx	*c = s->priv_data;
 
+	if(c->use_framebuf) {
+		pvt_cleanup_membuffer(&c->pvt_framebuf);
+	}
 	if(c->gl_texmap && c->xdisplay && c->gl_pixmap && c->gl_ctx) {
 		glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 		glDeleteTextures(1, &c->gl_texmap);
