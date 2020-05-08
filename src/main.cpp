@@ -48,7 +48,7 @@ int main(int argc, char *argv[]) {
 		av_register_all();
 		avdevice_register_all();
 		bool		useX11grab = true,
-				writeOutput = true;
+				writeOutput = false;
 		// fps value
 		const int	FPS = 30;
 		AVFormatContext	*fctx_ = 0;

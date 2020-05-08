@@ -102,8 +102,11 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 }
 
 static void pvt_cleanup_membuffer(XCompGrabBuffer* buf) {
-	if(buf->slices)
+	if(buf->slices) {
+		for(int i = 0; i < buf->n_slices; ++i)
+			free(buf->slices[i].buf);
 		free(buf->slices);
+	}
 }
 
 static uint8_t* pvt_alloc_membuffer(XCompGrabBuffer* buf) {
@@ -137,6 +140,12 @@ static void pvt_free_membuffer(void* opaque, uint8_t* data) {
 /* Useful typedefs */
 typedef void (*f_glXBindTexImageEXT)(Display *, GLXDrawable, int, int *);
 typedef void (*f_glXReleaseTexImageEXT)(Display *, GLXDrawable, int);
+typedef void (*f_glGenBuffers)(GLsizei, GLuint*);
+typedef void (*f_glDeleteBuffers)(GLsizei, const GLuint*);
+typedef void (*f_glBindBuffer)(GLenum, GLuint);
+typedef void (*f_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
+typedef void* (*f_glMapBuffer)(GLenum, GLenum);
+typedef GLboolean (*f_glUnmapBuffer)(GLenum);
 
 /* this type has to have the first member
  * as a AVClass*, otherwise it will
@@ -151,6 +160,7 @@ typedef struct XCompGrabCtx {
 	GLXContext		gl_ctx;
 	GLXPixmap		gl_pixmap;
 	GLuint			gl_texmap;
+	GLuint			gl_pbo;
 	const char 		*framerate;
 	const char		*window_name;
 	int			use_framebuf;
@@ -159,6 +169,12 @@ typedef struct XCompGrabCtx {
 	int64_t			frame_duration;
 	f_glXBindTexImageEXT	glXBindTexImageEXT;
 	f_glXReleaseTexImageEXT	glXReleaseTexImageEXT;
+	f_glGenBuffers		glGenBuffers;
+	f_glDeleteBuffers	glDeleteBuffers;
+	f_glBindBuffer		glBindBuffer;
+	f_glBufferData		glBufferData;
+	f_glMapBuffer		glMapBuffer;
+	f_glUnmapBuffer		glUnmapBuffer;
 	XCompGrabBuffer		pvt_framebuf;
 } XCompGrabCtx;
 
@@ -303,6 +319,42 @@ static int pvt_check_gl_error(AVFormatContext *s, const char* desc) {
 	return -2;
 }
 
+static int pvt_init_gl_func(AVFormatContext *s, XCompGrabCtx *c) {
+	if(!(c->glXBindTexImageEXT = (f_glXBindTexImageEXT) glXGetProcAddress((GLubyte*)"glXBindTexImageEXT"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXBindTexImageEXT'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glXReleaseTexImageEXT = (f_glXReleaseTexImageEXT) glXGetProcAddress((GLubyte*)"glXReleaseTexImageEXT"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXReleaseTexImageEXT'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glGenBuffers = (f_glGenBuffers) glXGetProcAddress((GLubyte*)"glGenBuffers"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glGenBuffers'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glDeleteBuffers = (f_glDeleteBuffers) glXGetProcAddress((GLubyte*)"glDeleteBuffers"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glDeleteBuffers'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glBindBuffer = (f_glBindBuffer) glXGetProcAddress((GLubyte*)"glBindBuffer"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glBindBuffer'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glBufferData = (f_glBufferData) glXGetProcAddress((GLubyte*)"glBufferData"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glBufferData'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glMapBuffer = (f_glMapBuffer) glXGetProcAddress((GLubyte*)"glMapBuffer"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glMapBuffer'\n");
+		return AVERROR(ENOTSUP);
+	}
+	if(!(c->glUnmapBuffer = (f_glUnmapBuffer) glXGetProcAddress((GLubyte*)"glUnmapBuffer"))) {
+		av_log(s, AV_LOG_ERROR, "Can't lookup 'glUnmapBuffer'\n");
+		return AVERROR(ENOTSUP);
+	}
+	return 0;
+}
+
 static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
@@ -312,6 +364,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	c->win_pixmap = 0;
 	c->gl_ctx = 0;
 	c->gl_texmap = 0;
+	c->gl_pbo = 0;
 
 	c->xdisplay = XOpenDisplay(NULL);
 	if(!c->xdisplay)
@@ -413,18 +466,23 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	/* setup the bin/unbind of TexImageEXT */
-	c->glXBindTexImageEXT = (f_glXBindTexImageEXT) glXGetProcAddress((GLubyte*)"glXBindTexImageEXT");
-	if(!c->glXBindTexImageEXT) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXBindTexImageEXT'\n");
+	/* init all nonstandard gl func */
+	rv = pvt_init_gl_func(s, c);
+	if(rv < 0) {
 		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		return rv;
 	}
-	c->glXReleaseTexImageEXT = (f_glXReleaseTexImageEXT) glXGetProcAddress((GLubyte*)"glXReleaseTexImageEXT");
-	if(!c->glXReleaseTexImageEXT) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXReleaseTexImageEXT'\n");
+	/* take care of PBO */
+	c->glGenBuffers(1, &c->gl_pbo);
+	if(pvt_check_gl_error(s, "glGenBuffers") < 0) {
 		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		return AVERROR(EINVAL);
+	}
+	c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
+	c->glBufferData(GL_PIXEL_PACK_BUFFER, c->win_attr.width*c->win_attr.height* 4, NULL, GL_STREAM_READ);
+	if(pvt_check_gl_error(s, "glBufferData") < 0) {
+		xcompgrab_read_close(s);
+		return AVERROR(EINVAL);
 	}
 	/* Initialize buffer if necessary */
 	if(c->use_framebuf) {
@@ -483,18 +541,17 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	pkt->size = length;
 
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
+	c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	c->glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
-	if(pvt_check_gl_error(s, "glXBindTexImageEXT") < 0) {
-		av_log(s, AV_LOG_FATAL, "No being able to execute glXBindTexImageEXT will lead to corrupted stream capture\n");
-		return AVERROR(EINVAL);
-	}
-	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+	/* with PBOs, the below call is asynchronous
+	 * and the buffer indicates an offset - which is 0
+	 */
+	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+	/* this call is synchrounous */
+	memcpy(data, c->glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY), length);
+	c->glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
 	c->glXReleaseTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT);
-	if(pvt_check_gl_error(s, "glXReleaseTexImageEXT") < 0) {
-		av_log(s, AV_LOG_FATAL, "No being able to execute glXReleaseTexImageEXT will lead to corrupted stream capture\n");
-		return AVERROR(EINVAL);
-	}
 	return 0;
 }
 
@@ -503,6 +560,11 @@ static av_cold int xcompgrab_read_close(AVFormatContext *s) {
 
 	if(c->use_framebuf) {
 		pvt_cleanup_membuffer(&c->pvt_framebuf);
+	}
+	if(c->gl_pbo && c->xdisplay && c->gl_pixmap && c->gl_ctx) {
+		glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
+		c->glDeleteBuffers(1, &c->gl_pbo);
+		c->gl_pbo = 0;
 	}
 	if(c->gl_texmap && c->xdisplay && c->gl_pixmap && c->gl_ctx) {
 		glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
