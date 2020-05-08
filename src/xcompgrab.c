@@ -164,6 +164,7 @@ typedef struct XCompGrabCtx {
 	const char 		*framerate;
 	const char		*window_name;
 	int			use_framebuf;
+	int			use_glpbo;
 	int64_t			time_frame;
 	AVRational		time_base;
 	int64_t			frame_duration;
@@ -185,6 +186,7 @@ static const AVOption options[] = {
 	{ "framerate", "", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = "ntsc" }, 0, 0, D },
 	{ "window_name", "X window name/title", OFFSET(window_name), AV_OPT_TYPE_STRING, {.str = "Desktop" }, 0, 0, D },
 	{ "use_framebuf", "Use internal framebuffer to store packet data, increase memory usage for much better performance", OFFSET(use_framebuf), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, D },
+	{ "use_glpbo", "Use OpenGL Pixel Buffer Object to transfer data for better CPU usage, otherwise use legacy GL functions", OFFSET(use_glpbo), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, D },
 	{ NULL },
 };
 
@@ -328,29 +330,31 @@ static int pvt_init_gl_func(AVFormatContext *s, XCompGrabCtx *c) {
 		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXReleaseTexImageEXT'\n");
 		return AVERROR(ENOTSUP);
 	}
-	if(!(c->glGenBuffers = (f_glGenBuffers) glXGetProcAddress((GLubyte*)"glGenBuffers"))) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glGenBuffers'\n");
-		return AVERROR(ENOTSUP);
-	}
-	if(!(c->glDeleteBuffers = (f_glDeleteBuffers) glXGetProcAddress((GLubyte*)"glDeleteBuffers"))) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glDeleteBuffers'\n");
-		return AVERROR(ENOTSUP);
-	}
-	if(!(c->glBindBuffer = (f_glBindBuffer) glXGetProcAddress((GLubyte*)"glBindBuffer"))) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glBindBuffer'\n");
-		return AVERROR(ENOTSUP);
-	}
-	if(!(c->glBufferData = (f_glBufferData) glXGetProcAddress((GLubyte*)"glBufferData"))) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glBufferData'\n");
-		return AVERROR(ENOTSUP);
-	}
-	if(!(c->glMapBuffer = (f_glMapBuffer) glXGetProcAddress((GLubyte*)"glMapBuffer"))) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glMapBuffer'\n");
-		return AVERROR(ENOTSUP);
-	}
-	if(!(c->glUnmapBuffer = (f_glUnmapBuffer) glXGetProcAddress((GLubyte*)"glUnmapBuffer"))) {
-		av_log(s, AV_LOG_ERROR, "Can't lookup 'glUnmapBuffer'\n");
-		return AVERROR(ENOTSUP);
+	if(c->use_glpbo) {
+		if(!(c->glGenBuffers = (f_glGenBuffers) glXGetProcAddress((GLubyte*)"glGenBuffers"))) {
+			av_log(s, AV_LOG_ERROR, "Can't lookup 'glGenBuffers'\n");
+			return AVERROR(ENOTSUP);
+		}
+		if(!(c->glDeleteBuffers = (f_glDeleteBuffers) glXGetProcAddress((GLubyte*)"glDeleteBuffers"))) {
+			av_log(s, AV_LOG_ERROR, "Can't lookup 'glDeleteBuffers'\n");
+			return AVERROR(ENOTSUP);
+		}
+		if(!(c->glBindBuffer = (f_glBindBuffer) glXGetProcAddress((GLubyte*)"glBindBuffer"))) {
+			av_log(s, AV_LOG_ERROR, "Can't lookup 'glBindBuffer'\n");
+			return AVERROR(ENOTSUP);
+		}
+		if(!(c->glBufferData = (f_glBufferData) glXGetProcAddress((GLubyte*)"glBufferData"))) {
+			av_log(s, AV_LOG_ERROR, "Can't lookup 'glBufferData'\n");
+			return AVERROR(ENOTSUP);
+		}
+		if(!(c->glMapBuffer = (f_glMapBuffer) glXGetProcAddress((GLubyte*)"glMapBuffer"))) {
+			av_log(s, AV_LOG_ERROR, "Can't lookup 'glMapBuffer'\n");
+			return AVERROR(ENOTSUP);
+		}
+		if(!(c->glUnmapBuffer = (f_glUnmapBuffer) glXGetProcAddress((GLubyte*)"glUnmapBuffer"))) {
+			av_log(s, AV_LOG_ERROR, "Can't lookup 'glUnmapBuffer'\n");
+			return AVERROR(ENOTSUP);
+		}
 	}
 	return 0;
 }
@@ -473,16 +477,19 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		return rv;
 	}
 	/* take care of PBO */
-	c->glGenBuffers(1, &c->gl_pbo);
-	if(pvt_check_gl_error(s, "glGenBuffers") < 0) {
-		xcompgrab_read_close(s);
-		return AVERROR(EINVAL);
-	}
-	c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
-	c->glBufferData(GL_PIXEL_PACK_BUFFER, c->win_attr.width*c->win_attr.height* 4, NULL, GL_STREAM_READ);
-	if(pvt_check_gl_error(s, "glBufferData") < 0) {
-		xcompgrab_read_close(s);
-		return AVERROR(EINVAL);
+	if(c->use_glpbo) {
+		av_log(s, AV_LOG_INFO, "Using GL Pixel Buffer Object to transfer the composite window\n");
+		c->glGenBuffers(1, &c->gl_pbo);
+		if(pvt_check_gl_error(s, "glGenBuffers") < 0) {
+			xcompgrab_read_close(s);
+			return AVERROR(EINVAL);
+		}
+		c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
+		c->glBufferData(GL_PIXEL_PACK_BUFFER, c->win_attr.width*c->win_attr.height* 4, NULL, GL_STREAM_READ);
+		if(pvt_check_gl_error(s, "glBufferData") < 0) {
+			xcompgrab_read_close(s);
+			return AVERROR(EINVAL);
+		}
 	}
 	/* Initialize buffer if necessary */
 	if(c->use_framebuf) {
@@ -539,18 +546,24 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	pkt->duration = c->frame_duration;
 	pkt->data = data;
 	pkt->size = length;
-
+	/* gl calls to capture the composite window */
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
-	c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
+	if(c->use_glpbo) {
+		c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
+	}
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	c->glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
-	/* with PBOs, the below call is asynchronous
-	 * and the buffer indicates an offset - which is 0
-	 */
-	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-	/* this call is synchrounous */
-	memcpy(data, c->glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY), length);
-	c->glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+	if(c->use_glpbo) {
+		/* with PBOs, the below call is asynchronous
+		 * and the buffer indicates an offset - which is 0
+		 */
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+		/* this call is synchrounous */
+		memcpy(data, c->glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY), length);
+		c->glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+	} else {
+		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+	}
 	c->glXReleaseTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT);
 	return 0;
 }

@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
 		// Initial setup
 		av_register_all();
 		avdevice_register_all();
-		bool		useX11grab = true,
+		bool		useX11grab = false,
 				writeOutput = false;
 		// fps value
 		const int	FPS = 30;
@@ -72,7 +72,8 @@ int main(int argc, char *argv[]) {
 			AVDictionary	*opt = 0;
 			av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
 			av_dict_set(&opt, "window_name", (argc > 1) ? argv[1] : "Firefox", 0);
-			//av_dict_set_int(&opt, "use_framebuf", 1, 0);
+			//av_dict_set_int(&opt, "use_framebuf", 0, 0);
+			//av_dict_set_int(&opt, "use_glpbo", 0, 0);
 			averror(avformat_open_input(&fctx_, "", xcompformat, &opt));
 			// this is not great... but still
 			av_dict_free(&opt);
