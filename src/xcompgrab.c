@@ -57,7 +57,7 @@ static void avpriv_set_pts_info(AVStream *s, int pts_wrap_bits, unsigned int pts
 /* struct used for buffer allocation */
 typedef struct XCompGrabSlice {
 	int	used;
-	uint8_t	buf[1];
+	uint8_t	*buf;
 } XCompGrabSlice;
 
 typedef struct XCompGrabBuffer {
@@ -81,7 +81,7 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 		return AVERROR(ENOTSUP);
 	}
 	// allocate enough space for slices
-	out->slices = (XCompGrabSlice*)malloc(n_slices*(sizeof(XCompGrabSlice) + ((n_bytes-1)*sizeof(uint8_t))));
+	out->slices = (XCompGrabSlice*)malloc(n_slices*(sizeof(XCompGrabSlice)));
 	if(!out->slices) {
 		av_log(s, AV_LOG_ERROR, "Can't initialize internal memory buffer\n");
 		return AVERROR(ENOMEM);
@@ -90,6 +90,13 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 	// initialize those
 	for(int i = 0; i < out->n_slices; ++i) {
 		out->slices[i].used = 0;
+		out->slices[i].buf = (uint8_t*)malloc(n_bytes);
+		if(!out->slices[i].buf) {
+			for(int j = 0; j < i; ++j) {
+				free(out->slices[j].buf);
+			}
+			return AVERROR(ENOMEM);
+		}
 	}
 	return 0;
 }
@@ -331,6 +338,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);	
 	}
+	av_log(s, AV_LOG_INFO, "Captuing window id %ld, resolution %dx%d\n", c->win_capture, c->win_attr.width, c->win_attr.height);
 	/* get GLX FB configs and find the right to use */
 	const int 	config_attrs[] = {GLX_BIND_TO_TEXTURE_RGBA_EXT,
 				GL_TRUE,
