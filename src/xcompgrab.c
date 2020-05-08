@@ -65,6 +65,18 @@ typedef struct XCompGrabBuffer {
 	XCompGrabSlice	*slices;
 } XCompGrabBuffer;
 
+/* struct used for the PBO buffer allocation */
+typedef struct XCompGrabPBOSlice {
+	GLuint	pbo;
+	void*	ptr;
+	int	used;
+} XCompGrabPBOSlice;
+
+typedef struct XCompGrabPBOBuffer {
+	int			n_slices;
+	XCompGrabPBOSlice	*slices;
+} XCompGrabPBOBuffer;
+
 /* Utility functions to allocate/free memory */
 static uint8_t* pvt_alloc(int sz) {
 	return (uint8_t*)malloc(sz);
@@ -136,6 +148,54 @@ static void pvt_free_membuffer(void* opaque, uint8_t* data) {
 	}
 }
 
+static int pvt_init_pbobuffer(AVFormatContext *s, int n_slices, XCompGrabPBOBuffer* out) {
+	if(n_slices <= 0) {
+		av_log(s, AV_LOG_ERROR, "Invalid number of slices for internal memory buffer (%d)\n", n_slices);
+		return AVERROR(ENOTSUP);
+	}
+	out->slices = (XCompGrabPBOSlice*)malloc(sizeof(XCompGrabPBOSlice)*n_slices);
+	if(!out->slices) {
+		av_log(s, AV_LOG_ERROR, "Can't initialize internal memory buffer\n");
+		return AVERROR(ENOMEM);
+	}
+	out->n_slices = n_slices;
+	for(int i = 0; i < out->n_slices; ++i) {
+		out->slices[i].pbo = 0;
+		out->slices[i].ptr = 0;
+		out->slices[i].used = 0;
+	}
+	return 0;
+}
+
+static void pvt_cleanup_pbobuffer(XCompGrabPBOBuffer* buf) {
+	if(buf->slices)
+		free(buf->slices);
+}
+
+static XCompGrabPBOSlice* pvt_alloc_pbobuffer(XCompGrabPBOBuffer *buf) {
+	for(int i = 0; i < buf->n_slices; ++i) {
+		XCompGrabPBOSlice	*cur_slice = &buf->slices[i];
+		/* if we can atomically mark a slice as used, 
+		 * we can return its buffer
+		 */
+		if(__sync_bool_compare_and_swap(&cur_slice->used, 0, 1)) {
+			return cur_slice;
+		}
+
+	}
+	return 0;
+}
+
+static void pvt_free_pbobuffer(void* opaque, uint8_t* data) {
+	XCompGrabPBOSlice*	slice = (XCompGrabPBOSlice*)opaque;
+	/* we should crash if data != slice->ptr */
+	if(data == slice->ptr) {
+		if(!__sync_bool_compare_and_swap(&slice->used, 1, 0)) {
+			/* We should log fatal error */
+		}
+	}
+
+}
 
 /* Useful typedefs */
 typedef void (*f_glXBindTexImageEXT)(Display *, GLXDrawable, int, int *);
@@ -160,11 +220,9 @@ typedef struct XCompGrabCtx {
 	GLXContext		gl_ctx;
 	GLXPixmap		gl_pixmap;
 	GLuint			gl_texmap;
-	GLuint			gl_pbo;
 	const char 		*framerate;
 	const char		*window_name;
-	int			use_framebuf;
-	int			use_glpbo;
+	int			framebuf_type;
 	int64_t			time_frame;
 	AVRational		time_base;
 	int64_t			frame_duration;
@@ -177,16 +235,20 @@ typedef struct XCompGrabCtx {
 	f_glMapBuffer		glMapBuffer;
 	f_glUnmapBuffer		glUnmapBuffer;
 	XCompGrabBuffer		pvt_framebuf;
+	XCompGrabPBOBuffer	glpbo_framebuf;
 } XCompGrabCtx;
 
 #define OFFSET(x) offsetof(XCompGrabCtx, x)
 #define D AV_OPT_FLAG_DECODING_PARAM
 
+#define BUF_SYSTEM	(0)
+#define BUF_INTERNAL	(1)
+#define BUF_GLPBO	(2)
+
 static const AVOption options[] = {
 	{ "framerate", "", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = "ntsc" }, 0, 0, D },
 	{ "window_name", "X window name/title", OFFSET(window_name), AV_OPT_TYPE_STRING, {.str = "Desktop" }, 0, 0, D },
-	{ "use_framebuf", "Use internal framebuffer to store packet data, increase memory usage for much better performance", OFFSET(use_framebuf), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, D },
-	{ "use_glpbo", "Use OpenGL Pixel Buffer Object to transfer data for better CPU usage, otherwise use legacy GL functions", OFFSET(use_glpbo), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, D },
+	{ "framebuf_type", "0 to use system memory (slow), 1 for internal buffers, 2 for GL PBO managed buffers", OFFSET(framebuf_type), AV_OPT_TYPE_INT, { .i64 = BUF_INTERNAL }, BUF_SYSTEM, BUF_GLPBO, D },
 	{ NULL },
 };
 
@@ -330,7 +392,7 @@ static int pvt_init_gl_func(AVFormatContext *s, XCompGrabCtx *c) {
 		av_log(s, AV_LOG_ERROR, "Can't lookup 'glXReleaseTexImageEXT'\n");
 		return AVERROR(ENOTSUP);
 	}
-	if(c->use_glpbo) {
+	if(c->framebuf_type == BUF_GLPBO) {
 		if(!(c->glGenBuffers = (f_glGenBuffers) glXGetProcAddress((GLubyte*)"glGenBuffers"))) {
 			av_log(s, AV_LOG_ERROR, "Can't lookup 'glGenBuffers'\n");
 			return AVERROR(ENOTSUP);
@@ -368,7 +430,6 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	c->win_pixmap = 0;
 	c->gl_ctx = 0;
 	c->gl_texmap = 0;
-	c->gl_pbo = 0;
 
 	c->xdisplay = XOpenDisplay(NULL);
 	if(!c->xdisplay)
@@ -476,29 +537,43 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		xcompgrab_read_close(s);
 		return rv;
 	}
-	/* take care of PBO */
-	if(c->use_glpbo) {
-		av_log(s, AV_LOG_INFO, "Using GL Pixel Buffer Object to transfer the composite window\n");
-		c->glGenBuffers(1, &c->gl_pbo);
-		if(pvt_check_gl_error(s, "glGenBuffers") < 0) {
-			xcompgrab_read_close(s);
-			return AVERROR(EINVAL);
-		}
-		c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
-		c->glBufferData(GL_PIXEL_PACK_BUFFER, c->win_attr.width*c->win_attr.height* 4, NULL, GL_STREAM_READ);
-		if(pvt_check_gl_error(s, "glBufferData") < 0) {
-			xcompgrab_read_close(s);
-			return AVERROR(EINVAL);
-		}
-	}
-	/* Initialize buffer if necessary */
-	if(c->use_framebuf) {
-		av_log(s, AV_LOG_INFO, "Using internal framebuffers instead of system memory\n");
-		rv = pvt_init_membuffer(s, 32, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf);
+	/* take care of different buffer types */
+	switch(c->framebuf_type) {
+	case BUF_INTERNAL:
+		av_log(s, AV_LOG_INFO, "Using internal framebuffers\n");
+		rv = pvt_init_membuffer(s, 8, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf);
 		if(rv < 0) {
 			xcompgrab_read_close(s);
 			return rv;
 		}
+		break;
+	case BUF_GLPBO:
+		av_log(s, AV_LOG_INFO, "Using GL Pixel Buffer Object to manage framebuffers\n");
+		rv = pvt_init_pbobuffer(s, 8, &c->glpbo_framebuf);
+		if(rv < 0) {
+			xcompgrab_read_close(s);
+			return rv;
+		}
+		/* init each single PBO */
+		for(int i = 0; i < c->glpbo_framebuf.n_slices; ++i) {
+			GLuint	*cur_pbo = &c->glpbo_framebuf.slices[i].pbo;
+			c->glGenBuffers(1, cur_pbo);
+			if(pvt_check_gl_error(s, "glGenBuffers") < 0) {
+				xcompgrab_read_close(s);
+				return AVERROR(EINVAL);
+			}
+			c->glBindBuffer(GL_PIXEL_PACK_BUFFER, *cur_pbo);
+			c->glBufferData(GL_PIXEL_PACK_BUFFER, c->win_attr.width*c->win_attr.height* 4, NULL, GL_STREAM_READ);
+			if(pvt_check_gl_error(s, "glBufferData") < 0) {
+				xcompgrab_read_close(s);
+				return AVERROR(EINVAL);
+			}
+		}
+		break;
+	case BUF_SYSTEM:
+	default:
+		av_log(s, AV_LOG_INFO, "Using system memory for framebuffers\n");
+		break;
 	}
 	/* init public stream info */
 	rv = pvt_init_stream(s);
@@ -531,36 +606,53 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 	 * pool (malloc/pvt_membuffer)
 	 */
 	pkt->buf = 0;
-	if(!c->use_framebuf) {
-		data = pvt_alloc(length);
-		if (data) pkt->buf = av_buffer_create(data, length, pvt_free, 0, 0);
-	} else {
-		data = pvt_alloc_membuffer(&c->pvt_framebuf);
-		if (data) pkt->buf = av_buffer_create(data, length, pvt_free_membuffer, &c->pvt_framebuf, 0);
-		else av_log(s, AV_LOG_WARNING, "Warning: consumer is too slow in processing AVPacket from av_read_frame (or equivalent call)\n");
+	/* init memory based on framebuffer type */
+	if(c->framebuf_type != BUF_GLPBO) {
+		if(c->framebuf_type == BUF_SYSTEM) {
+			data = pvt_alloc(length);
+			if (data) pkt->buf = av_buffer_create(data, length, pvt_free, 0, 0);
+		} else {
+			data = pvt_alloc_membuffer(&c->pvt_framebuf);
+			if (data) pkt->buf = av_buffer_create(data, length, pvt_free_membuffer, &c->pvt_framebuf, 0);
+			else av_log(s, AV_LOG_WARNING, "Warning: consumer is too slow in processing AVPacket from av_read_frame (or equivalent call)\n");
+		}
+		if (!pkt->buf) {
+			return AVERROR(ENOMEM);
+		}
 	}
-    	if (!pkt->buf) {
-        	return AVERROR(ENOMEM);
-    	}
 	pkt->dts = pkt->pts = pts;
 	pkt->duration = c->frame_duration;
 	pkt->data = data;
 	pkt->size = length;
 	/* gl calls to capture the composite window */
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
-	if(c->use_glpbo) {
-		c->glBindBuffer(GL_PIXEL_PACK_BUFFER, c->gl_pbo);
-	}
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	c->glXBindTexImageEXT(c->xdisplay, c->gl_pixmap, GLX_FRONT_LEFT_EXT, NULL);
-	if(c->use_glpbo) {
+	if(c->framebuf_type == BUF_GLPBO) {
+		XCompGrabPBOSlice	*slice = pvt_alloc_pbobuffer(&c->glpbo_framebuf);
+		if(!slice) {
+			av_log(s, AV_LOG_WARNING, "Warning: consumer is too slow in processing AVPacket from av_read_frame (or equivalent call)\n");
+			return AVERROR(ENOMEM);
+		}
+		c->glBindBuffer(GL_PIXEL_PACK_BUFFER, slice->pbo);
+		/* if we had data, unmap and set the pointer to 0 */
+		if(slice->ptr) {
+			c->glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+			slice->ptr = 0;
+		}
 		/* with PBOs, the below call is asynchronous
 		 * and the buffer indicates an offset - which is 0
 		 */
 		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 		/* this call is synchrounous */
-		memcpy(data, c->glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY), length);
-		c->glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+		slice->ptr = c->glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		if(!slice->ptr) {
+			av_log(s, AV_LOG_FATAL, "Fatal: the GL driver couldn't DMA the buffer using PBO\n");
+			return AVERROR(ENOMEM);
+		}
+		/* Then, we initialize the packet */
+		pkt->buf = av_buffer_create(slice->ptr, length, pvt_free_pbobuffer, slice, 0);
+		pkt->data = slice->ptr;
 	} else {
 		glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 	}
@@ -571,13 +663,25 @@ static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
 static av_cold int xcompgrab_read_close(AVFormatContext *s) {
 	XCompGrabCtx	*c = s->priv_data;
 
-	if(c->use_framebuf) {
+	/* clear respective buffer type */
+	switch(c->framebuf_type) {
+	case BUF_INTERNAL:
 		pvt_cleanup_membuffer(&c->pvt_framebuf);
-	}
-	if(c->gl_pbo && c->xdisplay && c->gl_pixmap && c->gl_ctx) {
-		glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
-		c->glDeleteBuffers(1, &c->gl_pbo);
-		c->gl_pbo = 0;
+		break;
+	case BUF_GLPBO:
+		if(c->xdisplay && c->gl_pixmap && c->gl_ctx) {
+			glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
+			c->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+			for(int i = 0; i < c->glpbo_framebuf.n_slices; ++i)
+				if(c->glpbo_framebuf.slices[i].pbo)
+					c->glDeleteBuffers(1, &c->glpbo_framebuf.slices[i].pbo);
+		}
+		pvt_cleanup_pbobuffer(&c->glpbo_framebuf);
+		break;
+	case BUF_SYSTEM:
+	default:
+		break;
+
 	}
 	if(c->gl_texmap && c->xdisplay && c->gl_pixmap && c->gl_ctx) {
 		glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
