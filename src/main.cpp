@@ -44,58 +44,39 @@ int main(int argc, char *argv[]) {
 	try {
 		using namespace utils;
 
-		/*AVFormatContext	*ctx = 0;
-		AVPacket	pkt = {0};
-		AVDictionary	*opt_ = 0;
-		av_dict_set(&opt_, "framerate", "60", 0);
-		av_dict_set(&opt_, "window_name", "Firefox", 0);
-		avformat_open_input(&ctx, "", &ff_xcompgrab_demuxer, &opt_);
-		av_dict_free(&opt_);
-		AVStream	*st = ctx->streams[0];
-		ff_xcompgrab_demuxer.read_packet(ctx, &pkt);
-		{
-			std::ofstream ppm("out.ppm");
-			ppm << "P3\n";
-			ppm << st->codecpar->width << " " << st->codecpar->height << '\n';
-			ppm << "255\n";
-			for(int i = 0; i < st->codecpar->width*st->codecpar->height; ++i) {
-				const uint8_t	*data = &pkt.buf->data[i*4];
-				ppm << (int)data[0] << " " << (int)data[1] << " " << (int)data[2] << '\n';
-			}
-		}
-		avformat_close_input(&ctx);
-		return 0;*/
-
 		// Initial setup
 		av_register_all();
 		avdevice_register_all();
+		bool		useX11grab = true,
+				writeOutput = true;
 		// fps value
 		const int	FPS = 30;
+		AVFormatContext	*fctx_ = 0;
 		// HW decode sample https://ffmpeg.org/doxygen/3.4/hw__decode_8c_source.html
-		// get X11
-		/*auto*	x11format = av_find_input_format("x11grab");
-		if(!x11format)
-			throw std::runtime_error("av_find_input_format - can't find 'x11grab'");
-		// open x11grab
-		AVFormatContext	*fctx_ = 0;
-		AVDictionary	*opt = 0;
-		av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
-		av_dict_set(&opt, "video_size", "3440x1440", 0);
-		averror(avformat_open_input(&fctx_, ":0.0", x11format, &opt));
-		// this is not great... but still
-		av_dict_free(&opt);*/
-		auto*	xcompformat = &ff_xcompgrab_demuxer;
-		if(!xcompformat)
-			throw std::runtime_error("av_find_input_format - can't find 'xcompgrab'");
-		// open x11grab
-		AVFormatContext	*fctx_ = 0;
-		AVDictionary	*opt = 0;
-		av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
-		av_dict_set(&opt, "window_name", (argc > 1) ? argv[1] : "Firefox", 0);
-		//av_dict_set_int(&opt, "use_framebuf", 1, 0);
-		averror(avformat_open_input(&fctx_, "", xcompformat, &opt));
-		// this is not great... but still
-		av_dict_free(&opt);
+		if(useX11grab) {
+			auto*	x11format = av_find_input_format("x11grab");
+			if(!x11format)
+				throw std::runtime_error("av_find_input_format - can't find 'x11grab'");
+			// open x11grab
+			AVDictionary	*opt = 0;
+			av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
+			av_dict_set(&opt, "video_size", "1720x1376" /*"3440x1440"*/, 0);
+			averror(avformat_open_input(&fctx_, ":0.0", x11format, &opt));
+			// this is not great... but still
+			av_dict_free(&opt);
+		} else {
+			auto*	xcompformat = &ff_xcompgrab_demuxer;
+			if(!xcompformat)
+				throw std::runtime_error("av_find_input_format - can't find 'xcompgrab'");
+			// open xcompgrab
+			AVDictionary	*opt = 0;
+			av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
+			av_dict_set(&opt, "window_name", (argc > 1) ? argv[1] : "Firefox", 0);
+			//av_dict_set_int(&opt, "use_framebuf", 1, 0);
+			averror(avformat_open_input(&fctx_, "", xcompformat, &opt));
+			// this is not great... but still
+			av_dict_free(&opt);
+		}
 		// embed in a unique_ptr to leverage RAII
 		std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	fctx(fctx_, [](AVFormatContext* p){ if(p) avformat_close_input(&p); });
 		// need to allocate a decoder for the
@@ -159,7 +140,11 @@ int main(int argc, char *argv[]) {
 						cur_frame++;
 						std::printf("Frame %d\r", cur_frame);
 						std::fflush(stdout);
-						c_deq.push(cur_fh);
+						if(writeOutput) c_deq.push(cur_fh);
+						else {
+							av_frame_unref(cur_fh->frame.get());
+							cur_fh->release();
+						}
 					}
 					if(AVERROR(EAGAIN) == rv) {
 						cur_fh->release();

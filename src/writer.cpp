@@ -124,10 +124,12 @@ namespace {
 				fh->release();
 			}
 			// one last step to close the file
-			averror(avcodec_send_frame(ocodec.get(), 0));
-			avcodec_receive_packet(ocodec.get(), opkt.get());
-			averror(av_write_frame(octx.get(), opkt.get()));
-			av_packet_unref(opkt.get());
+			if(written_frames) {
+				averror(avcodec_send_frame(ocodec.get(), 0));
+				avcodec_receive_packet(ocodec.get(), opkt.get());
+				averror(av_write_frame(octx.get(), opkt.get()));
+				av_packet_unref(opkt.get());
+			}
 			// close off all the streams
 			averror(av_write_trailer(octx.get()));
 			std::cout << "Written " << written_frames << " frames" << std::endl;
