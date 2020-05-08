@@ -494,7 +494,7 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	/* Initialize buffer if necessary */
 	if(c->use_framebuf) {
 		av_log(s, AV_LOG_INFO, "Using internal framebuffers instead of system memory\n");
-		rv = pvt_init_membuffer(s, 8, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf);
+		rv = pvt_init_membuffer(s, 32, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf);
 		if(rv < 0) {
 			xcompgrab_read_close(s);
 			return rv;

@@ -36,7 +36,7 @@ namespace {
 			AVFormatContext	*octx_ = 0;
 			averror(avformat_alloc_output_context2(&octx_, ofmt, 0, outfile));
 			std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)>	octx(octx_, [](AVFormatContext* p){ if(p) avformat_free_context(p); });
-			auto		*penc = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+			auto		*penc = avcodec_find_encoder(AV_CODEC_ID_H264); //AV_CODEC_ID_MPEG4);
 			if(!penc)
 				throw std::runtime_error("avcodec_find_encoder");
 			AVStream	*strm = avformat_new_stream(octx.get(), penc);
@@ -58,8 +58,12 @@ namespace {
 			// fix about global headers
 			if(octx->oformat->flags & AVFMT_GLOBALHEADER)
 				octx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+			// codec params
+			AVDictionary *param = 0;
+			av_dict_set(&param, "preset", "ultrafast", 0);
 			// bind context codec
-			averror(avcodec_open2(ocodec.get(), penc, 0));
+			averror(avcodec_open2(ocodec.get(), penc, &param));
+			av_dict_free(&param);
 			// fill in the context parameters
 			averror(avcodec_parameters_from_context(strm->codecpar, ocodec.get()));
 			// in case we have to create a file, do it...

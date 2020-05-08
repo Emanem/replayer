@@ -50,7 +50,7 @@ int main(int argc, char *argv[]) {
 		bool		useX11grab = false,
 				writeOutput = true;
 		// fps value
-		const int	FPS = 30;
+		const int	FPS = 60;
 		AVFormatContext	*fctx_ = 0;
 		// HW decode sample https://ffmpeg.org/doxygen/3.4/hw__decode_8c_source.html
 		if(useX11grab) {
@@ -118,7 +118,7 @@ int main(int argc, char *argv[]) {
 		// structures to share data between threads
 		// the 'screen-reader' (main) and output 'writer'
 		concurrent_deque<frame_holder*>	c_deq;
-		frame_buffers			frame_bufs(16);
+		frame_buffers			frame_bufs(128);
 		std::unique_ptr<writer::iface>	cur_writer(writer::init(writer::params{FPS, ccodec.get()}, c_deq));
 		cur_writer->start();
 		// embed in a unique_ptr to leverage RAII
