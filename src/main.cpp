@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
 			// open x11grab
 			AVDictionary	*opt = 0;
 			av_dict_set(&opt, "framerate", std::to_string(FPS).c_str(), 0);
-			av_dict_set(&opt, "video_size", "1920x1080" /*"3440x1440"*/, 0);
+			av_dict_set(&opt, "video_size", "1720x1376" /*"1920x1080" "3440x1440"*/, 0);
 			averror(avformat_open_input(&fctx_, ":0.0", x11format, &opt));
 			// this is not great... but still
 			av_dict_free(&opt);

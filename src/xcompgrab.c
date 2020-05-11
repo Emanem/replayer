@@ -107,6 +107,7 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 			for(int j = 0; j < i; ++j) {
 				free(out->slices[j].buf);
 			}
+			free(out->slices);
 			return AVERROR(ENOMEM);
 		}
 	}
@@ -421,6 +422,34 @@ static int pvt_init_gl_func(AVFormatContext *s, XCompGrabCtx *c) {
 	return 0;
 }
 
+/* Functions and static variables to help out with error
+ * handling of X errors.
+ * A good reading is https://www.remlab.net/op/xlib.shtml
+ */
+
+static int 		is_x_error = 0;
+static char		x_error_buf[512];
+static XErrorHandler	prev_x_error_handler = 0;
+
+static int pvt_x_error_handler(Display *d, XErrorEvent* e) {
+	is_x_error = 1;
+	char	err_desc[128];
+	XGetErrorText(d, e->error_code, err_desc, 128);
+	err_desc[127] = '\0';
+	snprintf(x_error_buf, 511, "X error %d [%d, %d] : %s", e->error_code, e->request_code, e->minor_code, err_desc);
+	return 0;
+}
+
+static int pvt_check_x_error(AVFormatContext *s, Display *d) {
+	XSync(d, 0);
+	if(is_x_error) {
+		av_log(s, AV_LOG_ERROR, "%s\n", x_error_buf);
+		is_x_error = 0;
+		return -1;
+	}
+	return 0;
+}
+
 static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	int		rv = 0;
 	XCompGrabCtx	*c = s->priv_data;
@@ -434,6 +463,8 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	c->xdisplay = XOpenDisplay(NULL);
 	if(!c->xdisplay)
 		return AVERROR(ENODEV);
+	prev_x_error_handler = XSetErrorHandler(pvt_x_error_handler);
+	/* we should lock the display here */
 	/* check composite extension is supported */
 	if((rv = pvt_check_comp_support(s, c)) < 0) {
 		xcompgrab_read_close(s);
@@ -445,14 +476,16 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		xcompgrab_read_close(s);
 		return AVERROR(EINVAL);
 	}
-	/* TODO: we should manage errors! */
 	XCompositeRedirectWindow(c->xdisplay, c->win_capture, CompositeRedirectAutomatic);
-	/* TODO: need to understand why we're calling this API*/
-	XSelectInput(c->xdisplay, c->win_capture, StructureNotifyMask|ExposureMask|VisibilityChangeMask);
-	XSync(c->xdisplay, 0);
+	if(pvt_check_x_error(s, c->xdisplay) < 0) {
+		XSetErrorHandler(prev_x_error_handler);
+		xcompgrab_read_close(s);
+		return AVERROR(EINVAL);
+	}
 	/* Get windows attributes */
 	if(!XGetWindowAttributes(c->xdisplay, c->win_capture, &c->win_attr)) {
 		av_log(s, AV_LOG_ERROR, "Can't retrieve window attributes!\n");
+		XSetErrorHandler(prev_x_error_handler);
 		xcompgrab_read_close(s);
 		return AVERROR(ENOTSUP);	
 	}
@@ -470,6 +503,12 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	int		nelem = 0;
 	GLXFBConfig	*configs = glXChooseFBConfig(c->xdisplay, get_root_window_screen(c->xdisplay, c->win_attr.root), config_attrs, &nelem),
 			*cur_cfg = 0;
+	if(!configs) {
+		av_log(s, AV_LOG_ERROR, "glXChooseFBConfig failed\n");
+		XSetErrorHandler(prev_x_error_handler);
+		xcompgrab_read_close(s);
+		return AVERROR(ENOTSUP);
+	}
 	for(int i = 0; i < nelem; ++i) {
 		XVisualInfo *visual = glXGetVisualFromFBConfig(c->xdisplay, configs[i]);
 		if (!visual)
@@ -485,14 +524,16 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	}
 	if(!cur_cfg) {
 		av_log(s, AV_LOG_ERROR, "Couldn't find a valid FBConfig\n");
+		XSetErrorHandler(prev_x_error_handler);
 		xcompgrab_read_close(s);
 		XFree(configs);
 		return AVERROR(ENOTSUP);
 	}
 	/* Create the pixmap */
 	c->win_pixmap = XCompositeNameWindowPixmap(c->xdisplay, c->win_capture);
-	if(!c->win_pixmap) {
+	if(!c->win_pixmap || (pvt_check_x_error(s, c->xdisplay) < 0)) {
 		av_log(s, AV_LOG_ERROR, "Can't create Window Pixmap!\n");
+		XSetErrorHandler(prev_x_error_handler);
 		xcompgrab_read_close(s);
 		XFree(configs);
 		return AVERROR(ENOTSUP);
@@ -501,8 +542,9 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 				    GLX_TEXTURE_FORMAT_EXT,
 				    GLX_TEXTURE_FORMAT_RGBA_EXT, None};
 	c->gl_pixmap = glXCreatePixmap(c->xdisplay, *cur_cfg, c->win_pixmap, pixmap_attrs);
-	if(!c->gl_pixmap) {
+	if(!c->gl_pixmap || (pvt_check_x_error(s, c->xdisplay) < 0)) {
 		av_log(s, AV_LOG_ERROR, "Can't create GL Pixmap!\n");
+		XSetErrorHandler(prev_x_error_handler);
 		xcompgrab_read_close(s);
 		XFree(configs);
 		return AVERROR(ENOTSUP);
@@ -510,12 +552,22 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	c->gl_ctx = glXCreateNewContext(c->xdisplay, *cur_cfg, GLX_RGBA_TYPE, 0, 1);
 	if(!c->gl_ctx) {
 		av_log(s, AV_LOG_ERROR, "Can't create new GLXContext with glXCreateNewContext!\n");
+		XSetErrorHandler(prev_x_error_handler);
 		xcompgrab_read_close(s);
 		XFree(configs);
 		return AVERROR(ENOTSUP);
 	}
 	XFree(configs);
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
+	if(pvt_check_x_error(s, c->xdisplay) < 0) {
+		XSetErrorHandler(prev_x_error_handler);
+		xcompgrab_read_close(s);
+		return AVERROR(ENOTSUP);
+	}
+	/* At this stage all X commands should have
+	 * been done, remove the error callback
+	 */
+	XSetErrorHandler(prev_x_error_handler);
 	/* create gl texture in memory */
 	glEnable(GL_TEXTURE_2D);
 	glGenTextures(1, &c->gl_texmap);
