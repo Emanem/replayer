@@ -429,7 +429,6 @@ static int pvt_init_gl_func(AVFormatContext *s, XCompGrabCtx *c) {
 
 static int 		is_x_error = 0;
 static char		x_error_buf[512];
-static XErrorHandler	prev_x_error_handler = 0;
 
 static int pvt_x_error_handler(Display *d, XErrorEvent* e) {
 	is_x_error = 1;
@@ -452,7 +451,10 @@ static int pvt_check_x_error(AVFormatContext *s, Display *d) {
 
 static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	int		rv = 0;
+	GLXFBConfig	*configs = 0,
+			*cur_cfg = 0;
 	XCompGrabCtx	*c = s->priv_data;
+	XErrorHandler	prev_x_error_handler = 0;
 
 	/* reset data members used for destruction */
 	c->xdisplay = 0;
@@ -467,27 +469,24 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	/* we should lock the display here */
 	/* check composite extension is supported */
 	if((rv = pvt_check_comp_support(s, c)) < 0) {
-		xcompgrab_read_close(s);
-		return rv;
+		goto err_exit;
 	}
 	/* find the window name */
 	if(pvt_find_window(c->xdisplay, c->window_name, &c->win_capture) < 0) {
 		av_log(s, AV_LOG_ERROR, "Can't find X window containing string '%s'\n", c->window_name);
-		xcompgrab_read_close(s);
-		return AVERROR(EINVAL);
+		rv = AVERROR(EINVAL);
+		goto err_exit;
 	}
 	XCompositeRedirectWindow(c->xdisplay, c->win_capture, CompositeRedirectAutomatic);
 	if(pvt_check_x_error(s, c->xdisplay) < 0) {
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		return AVERROR(EINVAL);
+		rv = AVERROR(EINVAL);
+		goto err_exit;
 	}
 	/* Get windows attributes */
 	if(!XGetWindowAttributes(c->xdisplay, c->win_capture, &c->win_attr)) {
 		av_log(s, AV_LOG_ERROR, "Can't retrieve window attributes!\n");
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);	
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	av_log(s, AV_LOG_INFO, "Captuing window id %ld, resolution %dx%d\n", c->win_capture, c->win_attr.width, c->win_attr.height);
 	/* get GLX FB configs and find the right to use */
@@ -501,13 +500,11 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 				GL_FALSE,
 				None};
 	int		nelem = 0;
-	GLXFBConfig	*configs = glXChooseFBConfig(c->xdisplay, get_root_window_screen(c->xdisplay, c->win_attr.root), config_attrs, &nelem),
-			*cur_cfg = 0;
+	configs = glXChooseFBConfig(c->xdisplay, get_root_window_screen(c->xdisplay, c->win_attr.root), config_attrs, &nelem);
 	if(!configs) {
 		av_log(s, AV_LOG_ERROR, "glXChooseFBConfig failed\n");
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	for(int i = 0; i < nelem; ++i) {
 		XVisualInfo *visual = glXGetVisualFromFBConfig(c->xdisplay, configs[i]);
@@ -524,19 +521,15 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	}
 	if(!cur_cfg) {
 		av_log(s, AV_LOG_ERROR, "Couldn't find a valid FBConfig\n");
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		XFree(configs);
-		return AVERROR(ENOTSUP);
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	/* Create the pixmap */
 	c->win_pixmap = XCompositeNameWindowPixmap(c->xdisplay, c->win_capture);
 	if(!c->win_pixmap || (pvt_check_x_error(s, c->xdisplay) < 0)) {
 		av_log(s, AV_LOG_ERROR, "Can't create Window Pixmap!\n");
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		XFree(configs);
-		return AVERROR(ENOTSUP);
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	const int pixmap_attrs[] = {GLX_TEXTURE_TARGET_EXT, GLX_TEXTURE_2D_EXT,
 				    GLX_TEXTURE_FORMAT_EXT,
@@ -544,81 +537,72 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 	c->gl_pixmap = glXCreatePixmap(c->xdisplay, *cur_cfg, c->win_pixmap, pixmap_attrs);
 	if(!c->gl_pixmap || (pvt_check_x_error(s, c->xdisplay) < 0)) {
 		av_log(s, AV_LOG_ERROR, "Can't create GL Pixmap!\n");
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		XFree(configs);
-		return AVERROR(ENOTSUP);
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	c->gl_ctx = glXCreateNewContext(c->xdisplay, *cur_cfg, GLX_RGBA_TYPE, 0, 1);
 	if(!c->gl_ctx) {
 		av_log(s, AV_LOG_ERROR, "Can't create new GLXContext with glXCreateNewContext!\n");
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		XFree(configs);
-		return AVERROR(ENOTSUP);
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	XFree(configs);
+	configs = 0;
 	glXMakeCurrent(c->xdisplay, c->gl_pixmap, c->gl_ctx);
 	if(pvt_check_x_error(s, c->xdisplay) < 0) {
-		XSetErrorHandler(prev_x_error_handler);
-		xcompgrab_read_close(s);
-		return AVERROR(ENOTSUP);
+		rv = AVERROR(ENOTSUP);
+		goto err_exit;
 	}
 	/* At this stage all X commands should have
 	 * been done, remove the error callback
 	 */
 	XSetErrorHandler(prev_x_error_handler);
+	prev_x_error_handler = 0;
 	/* create gl texture in memory */
 	glEnable(GL_TEXTURE_2D);
 	glGenTextures(1, &c->gl_texmap);
 	if(pvt_check_gl_error(s, "glGenTextures") < 0) {
-		xcompgrab_read_close(s);
-		return AVERROR(EINVAL);
+		rv = AVERROR(EINVAL);
+		goto err_exit;
 	}
 	glBindTexture(GL_TEXTURE_2D, c->gl_texmap);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, c->win_attr.width, c->win_attr.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 	if(pvt_check_gl_error(s, "glTexImage2D") < 0) {
-		xcompgrab_read_close(s);
-		return AVERROR(EINVAL);
+		rv = AVERROR(EINVAL);
+		goto err_exit;
 	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	/* init all nonstandard gl func */
-	rv = pvt_init_gl_func(s, c);
-	if(rv < 0) {
-		xcompgrab_read_close(s);
-		return rv;
+	if((rv = pvt_init_gl_func(s, c)) < 0) {
+		goto err_exit;
 	}
 	/* take care of different buffer types */
 	switch(c->framebuf_type) {
 	case BUF_INTERNAL:
 		av_log(s, AV_LOG_INFO, "Using internal framebuffers\n");
-		rv = pvt_init_membuffer(s, 8, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf);
-		if(rv < 0) {
-			xcompgrab_read_close(s);
-			return rv;
+		if((rv = pvt_init_membuffer(s, 8, c->win_attr.width*c->win_attr.height*4, &c->pvt_framebuf)) < 0) {
+			goto err_exit;
 		}
 		break;
 	case BUF_GLPBO:
 		av_log(s, AV_LOG_INFO, "Using GL Pixel Buffer Object to manage framebuffers\n");
-		rv = pvt_init_pbobuffer(s, 8, &c->glpbo_framebuf);
-		if(rv < 0) {
-			xcompgrab_read_close(s);
-			return rv;
+		if((rv = pvt_init_pbobuffer(s, 8, &c->glpbo_framebuf)) < 0) {
+			goto err_exit;
 		}
 		/* init each single PBO */
 		for(int i = 0; i < c->glpbo_framebuf.n_slices; ++i) {
 			GLuint	*cur_pbo = &c->glpbo_framebuf.slices[i].pbo;
 			c->glGenBuffers(1, cur_pbo);
 			if(pvt_check_gl_error(s, "glGenBuffers") < 0) {
-				xcompgrab_read_close(s);
-				return AVERROR(EINVAL);
+				rv = AVERROR(EINVAL);
+				goto err_exit;
 			}
 			c->glBindBuffer(GL_PIXEL_PACK_BUFFER, *cur_pbo);
 			c->glBufferData(GL_PIXEL_PACK_BUFFER, c->win_attr.width*c->win_attr.height* 4, NULL, GL_STREAM_READ);
 			if(pvt_check_gl_error(s, "glBufferData") < 0) {
-				xcompgrab_read_close(s);
-				return AVERROR(EINVAL);
+				rv = AVERROR(EINVAL);
+				goto err_exit;
 			}
 		}
 		break;
@@ -628,12 +612,20 @@ static av_cold int xcompgrab_read_header(AVFormatContext *s) {
 		break;
 	}
 	/* init public stream info */
-	rv = pvt_init_stream(s);
-	if(rv < 0) {
-		xcompgrab_read_close(s);
-		return rv;
+	if((rv = pvt_init_stream(s)) < 0) {
+		goto err_exit;
 	}
 	return 0;
+
+err_exit:
+	if(configs)
+		XFree(configs);
+	if(is_x_error)
+		is_x_error = 0;
+	if(prev_x_error_handler)
+		XSetErrorHandler(prev_x_error_handler);
+	xcompgrab_read_close(s);
+	return rv;
 }
 
 static int xcompgrab_read_packet(AVFormatContext *s, AVPacket *pkt) {
