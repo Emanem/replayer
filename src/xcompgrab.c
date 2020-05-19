@@ -26,6 +26,7 @@
 #include <GL/gl.h>
 #include <GL/glx.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 /* taking inspiration from both
  * https://github.com/FFmpeg/FFmpeg/blob/e931119a41d0c48d1c544af89768b119b13feb4d/libavdevice/xcbgrab.c
@@ -127,7 +128,8 @@ static uint8_t* pvt_alloc_membuffer(XCompGrabBuffer* buf) {
 		/* if we can atomically mark a slice as used, 
 		 * we can return its buffer
 		 */
-		if(__sync_bool_compare_and_swap(&buf->slices[i].used, 0, 1)) {
+		int	exp = 0;
+		if(atomic_compare_exchange_strong(&buf->slices[i].used, &exp, 1)) {
 			return buf->slices[i].buf;
 		}
 	}
@@ -141,7 +143,8 @@ static void pvt_free_membuffer(void* opaque, uint8_t* data) {
 		if(data == buf->slices[i].buf) {
 			/* then reset the buffer to used=0
 			 *  this should never fail */
-			if(!__sync_bool_compare_and_swap(&buf->slices[i].used, 1, 0)) {
+			int	exp = 1;
+			if(!atomic_compare_exchange_strong(&buf->slices[i].used, &exp, 0)) {
 				/* We should log fatal error */
 			}
 			return;
@@ -179,7 +182,8 @@ static XCompGrabPBOSlice* pvt_alloc_pbobuffer(XCompGrabPBOBuffer *buf) {
 		/* if we can atomically mark a slice as used, 
 		 * we can return its buffer
 		 */
-		if(__sync_bool_compare_and_swap(&cur_slice->used, 0, 1)) {
+		int	exp = 0;
+		if(atomic_compare_exchange_strong(&cur_slice->used, &exp, 1)) {
 			return cur_slice;
 		}
 
@@ -191,7 +195,8 @@ static void pvt_free_pbobuffer(void* opaque, uint8_t* data) {
 	XCompGrabPBOSlice*	slice = (XCompGrabPBOSlice*)opaque;
 	/* we should crash if data != slice->ptr */
 	if(data == slice->ptr) {
-		if(!__sync_bool_compare_and_swap(&slice->used, 1, 0)) {
+		int	exp = 1;
+		if(!atomic_compare_exchange_strong(&slice->used, &exp, 0)) {
 			/* We should log fatal error */
 		}
 	}
