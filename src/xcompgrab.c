@@ -79,12 +79,12 @@ typedef struct XCompGrabPBOBuffer {
 
 /* Utility functions to allocate/free memory */
 static uint8_t* pvt_alloc(int sz) {
-	return (uint8_t*)malloc(sz);
+	return (uint8_t*)av_malloc(sz);
 }
 
 static void pvt_free(void* opaque, uint8_t* data) {
 	if(data)
-		free(data);
+		av_free(data);
 }
 
 static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCompGrabBuffer* out) {
@@ -93,7 +93,7 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 		return AVERROR(ENOTSUP);
 	}
 	// allocate enough space for slices
-	out->slices = (XCompGrabSlice*)malloc(n_slices*(sizeof(XCompGrabSlice)));
+	out->slices = (XCompGrabSlice*)av_malloc(n_slices*(sizeof(XCompGrabSlice)));
 	if(!out->slices) {
 		av_log(s, AV_LOG_ERROR, "Can't initialize internal memory buffer\n");
 		return AVERROR(ENOMEM);
@@ -102,12 +102,12 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 	// initialize those
 	for(int i = 0; i < out->n_slices; ++i) {
 		out->slices[i].used = 0;
-		out->slices[i].buf = (uint8_t*)malloc(n_bytes);
+		out->slices[i].buf = (uint8_t*)av_malloc(n_bytes);
 		if(!out->slices[i].buf) {
 			for(int j = 0; j < i; ++j) {
-				free(out->slices[j].buf);
+				av_free(out->slices[j].buf);
 			}
-			free(out->slices);
+			av_free(out->slices);
 			return AVERROR(ENOMEM);
 		}
 	}
@@ -117,8 +117,8 @@ static int pvt_init_membuffer(AVFormatContext *s, int n_slices, int n_bytes, XCo
 static void pvt_cleanup_membuffer(XCompGrabBuffer* buf) {
 	if(buf->slices) {
 		for(int i = 0; i < buf->n_slices; ++i)
-			free(buf->slices[i].buf);
-		free(buf->slices);
+			av_free(buf->slices[i].buf);
+		av_free(buf->slices);
 	}
 }
 
@@ -154,7 +154,7 @@ static int pvt_init_pbobuffer(AVFormatContext *s, int n_slices, XCompGrabPBOBuff
 		av_log(s, AV_LOG_ERROR, "Invalid number of slices for internal memory buffer (%d)\n", n_slices);
 		return AVERROR(ENOTSUP);
 	}
-	out->slices = (XCompGrabPBOSlice*)malloc(sizeof(XCompGrabPBOSlice)*n_slices);
+	out->slices = (XCompGrabPBOSlice*)av_malloc(sizeof(XCompGrabPBOSlice)*n_slices);
 	if(!out->slices) {
 		av_log(s, AV_LOG_ERROR, "Can't initialize internal memory buffer\n");
 		return AVERROR(ENOMEM);
@@ -170,7 +170,7 @@ static int pvt_init_pbobuffer(AVFormatContext *s, int n_slices, XCompGrabPBOBuff
 
 static void pvt_cleanup_pbobuffer(XCompGrabPBOBuffer* buf) {
 	if(buf->slices)
-		free(buf->slices);
+		av_free(buf->slices);
 }
 
 static XCompGrabPBOSlice* pvt_alloc_pbobuffer(XCompGrabPBOBuffer *buf) {
