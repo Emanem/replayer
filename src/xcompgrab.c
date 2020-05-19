@@ -312,9 +312,9 @@ static int pvt_find_window(Display *xdisplay, const char *target, Window* out) {
 			status = XFetchName(xdisplay, list[i], &win_name);
 			if (status >= Success && win_name) {
 				if (strstr(win_name, target)) {
+					*out = list[i];
 					XFree(win_name);
 					XFree(data);
-					*out = list[i];
 					return 0;
 				} else XFree(win_name);
 			}
